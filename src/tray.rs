@@ -8,6 +8,7 @@ use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, 
 #[derive(Clone)]
 pub struct Ids {
     refresh: MenuId,
+    settings: MenuId,
     larger: MenuId,
     smaller: MenuId,
     open_config: MenuId,
@@ -18,6 +19,7 @@ pub struct Ids {
 pub enum Action {
     Toggle,
     Refresh,
+    Settings,
     Larger,
     Smaller,
     OpenConfig,
@@ -40,6 +42,7 @@ pub struct Tray {
 impl Tray {
     pub fn new(autostart_on: bool) -> Result<Self, Box<dyn std::error::Error>> {
         let refresh = MenuItem::new("Refresh now", true, None);
+        let settings = MenuItem::new("Settings…", true, None);
         let larger = MenuItem::new("Larger", true, None);
         let smaller = MenuItem::new("Smaller", true, None);
         let open_config = MenuItem::new("Open config", true, None);
@@ -48,6 +51,7 @@ impl Tray {
         let menu = Menu::new();
         menu.append_items(&[
             &refresh,
+            &settings,
             &PredefinedMenuItem::separator(),
             &larger,
             &smaller,
@@ -68,6 +72,7 @@ impl Tray {
 
         let ids = Ids {
             refresh: refresh.id().clone(),
+            settings: settings.id().clone(),
             larger: larger.id().clone(),
             smaller: smaller.id().clone(),
             open_config: open_config.id().clone(),
@@ -119,6 +124,8 @@ pub fn menu_action(event: &MenuEvent, ids: &Ids) -> Option<Action> {
     let id = &event.id;
     Some(if id == &ids.refresh {
         Action::Refresh
+    } else if id == &ids.settings {
+        Action::Settings
     } else if id == &ids.larger {
         Action::Larger
     } else if id == &ids.smaller {

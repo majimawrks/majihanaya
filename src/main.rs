@@ -7,6 +7,7 @@ mod proc;
 mod providers;
 mod tray;
 mod trayview;
+mod ui;
 
 use config::Config;
 use eframe::egui;
@@ -30,14 +31,21 @@ fn main() -> eframe::Result {
 
     let config = Config::load();
     let state: model::Shared = Default::default();
-    // Placeholder size until M3; 320 × 440 is the design's compact window.
-    let size = [320.0, 440.0];
+    // The design's compact window; resized to its content after the first frame.
+    let size = [ui::COMPACT_W, 440.0];
+    // Borderless + transparent: the app draws the design's rounded rack and
+    // title bar itself, and opacity is a paint multiplier.
     let mut viewport = egui::ViewportBuilder::default()
         .with_title(platform::WINDOW_TITLE)
         .with_inner_size(size)
         .with_resizable(false)
+        .with_decorations(false)
+        .with_transparent(true)
         .with_taskbar(false);
-    // Saved drag position wins (M3); otherwise sit beside the tray.
+    if config.topmost {
+        viewport = viewport.with_always_on_top();
+    }
+    // Saved drag position wins; otherwise sit beside the tray.
     let saved = config.left.zip(config.top).map(|(x, y)| [x, y]);
     if let Some(pos) = saved.or_else(|| platform::default_position(size)) {
         viewport = viewport.with_position(pos);
@@ -91,6 +99,12 @@ struct App {
     tray: tray::Tray,
     /// Menu actions that need `App` (config, tray); drained in `logic`.
     actions: mpsc::Receiver<tray::Action>,
+    ui: ui::WindowUi,
+    /// Content size last sent to the viewport.
+    size: egui::Vec2,
+    /// Outer position we last placed or saw, and a drag-move awaiting save.
+    pos: Option<egui::Pos2>,
+    pending_save: Option<std::time::Instant>,
 }
 
 impl App {
@@ -139,7 +153,77 @@ impl App {
             None => {}
         }));
 
-        Ok(Self { config, state, window, quitting, tray, actions })
+        let ui = ui::WindowUi::new(&cc.egui_ctx);
+        Ok(Self {
+            config,
+            state,
+            window,
+            quitting,
+            tray,
+            actions,
+            ui,
+            size: egui::vec2(ui::COMPACT_W, 440.0),
+            pos: None,
+            pending_save: None,
+        })
+    }
+
+    /// Resizes the viewport to the content, keeping the corner nearest the
+    /// tray where it is (the window grows away from the tray).
+    fn fit(&mut self, ctx: &egui::Context, size: egui::Vec2) {
+        if (size - self.size).length() < 0.5 {
+            return;
+        }
+        let delta = size - self.size;
+        self.size = size;
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+        if let Some(outer) = ctx.input(|i| i.viewport().outer_rect) {
+            let corner = platform::tray_corner().map_or(platform::Corner::BottomRight, |(_, c, _)| c);
+            let dx = if corner == platform::Corner::BottomLeft { 0.0 } else { delta.x };
+            let dy = if corner == platform::Corner::TopRight { 0.0 } else { delta.y };
+            let to = outer.min - egui::vec2(dx, dy);
+            self.pos = Some(to);
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(to));
+        }
+    }
+
+    /// A move we didn't make is the user's drag: save it once it settles.
+    fn track_position(&mut self, ctx: &egui::Context) {
+        const SETTLE: std::time::Duration = std::time::Duration::from_millis(600);
+        let Some(outer) = ctx.input(|i| i.viewport().outer_rect) else { return };
+        match self.pos {
+            None => self.pos = Some(outer.min),
+            Some(p) if (p - outer.min).length() > 0.5 => {
+                self.pos = Some(outer.min);
+                self.pending_save = Some(std::time::Instant::now());
+                ctx.request_repaint_after(SETTLE);
+            }
+            _ => {}
+        }
+        if self.pending_save.is_some_and(|t| t.elapsed() >= SETTLE) {
+            self.pending_save = None;
+            self.config.left = Some(outer.min.x);
+            self.config.top = Some(outer.min.y);
+            let _ = self.config.save();
+        }
+    }
+
+    fn apply_settings(&mut self, ctx: &egui::Context, cfg: Config, autostart: bool) {
+        if cfg.topmost != self.config.topmost {
+            let level = if cfg.topmost { egui::WindowLevel::AlwaysOnTop } else { egui::WindowLevel::Normal };
+            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(level));
+        }
+        if cfg.scale != self.config.scale {
+            ctx.set_zoom_factor(cfg.scale);
+        }
+        // Keep the saved position: the panel doesn't edit it.
+        let (left, top) = (self.config.left, self.config.top);
+        self.config = Config { left, top, ..cfg.sanitized() };
+        let _ = self.config.save();
+        if autostart != platform::autostart_enabled() && platform::set_autostart(autostart).is_ok() {
+            self.tray.set_autostart_checked(autostart);
+        }
+        // Workers keep their start-up intervals until restart (hot reload: M4).
     }
 
     fn handle(&mut self, ctx: &egui::Context, action: tray::Action) {
@@ -150,6 +234,10 @@ impl App {
                 self.config.scale = ((self.config.scale + step) * 10.0).round().clamp(7.5, 20.0) / 10.0;
                 ctx.set_zoom_factor(self.config.scale);
                 let _ = self.config.save();
+            }
+            tray::Action::Settings => {
+                self.ui.open_settings(&self.config);
+                self.window.show();
             }
             tray::Action::Autostart => {
                 let want = self.tray.autostart_checked();
@@ -186,14 +274,30 @@ impl eframe::App for App {
         ctx.request_repaint_after(std::time::Duration::from_secs(secs));
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show(ui, |ui| {
-            // Placeholder until M3 builds the real window from the design.
-            ui.heading("majihanaya");
-            let json = serde_json::to_string_pretty(&*model::lock(&self.state)).unwrap_or_default();
-            egui::ScrollArea::vertical().show(ui, |ui| ui.monospace(json));
-        });
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        // Transparent outside the rounded rack.
+        [0.0; 4]
     }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        ui.set_opacity(self.config.opacity.clamp(0.5, 1.0));
+        let (size, actions) = {
+            let s = model::lock(&self.state);
+            self.ui.draw(ui, &s, &self.config)
+        };
+        for a in actions {
+            match a {
+                ui::Action::Hide => self.window.hide(),
+                ui::Action::StartDrag => ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag),
+                ui::Action::OpenConfig => open_config_file(),
+                ui::Action::Apply(cfg, autostart) => self.apply_settings(&ctx, *cfg, autostart),
+            }
+        }
+        self.fit(&ctx, size.ceil());
+        self.track_position(&ctx);
+    }
+
 }
 
 fn open_config_file() {
