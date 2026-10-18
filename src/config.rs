@@ -135,16 +135,28 @@ impl Config {
         self
     }
 
+    /// A config.json's text, or `None` when it isn't valid (a half-written
+    /// file mid-save, a typo): callers keep what they have instead.
+    pub fn parse(text: &str) -> Option<Self> {
+        serde_json::from_str::<Self>(text.trim_start_matches('\u{feff}')).ok().map(Self::sanitized)
+    }
+
     /// Writes to a temp file then renames, so a crash never leaves half a file.
     pub fn save(&self) -> io::Result<()> {
+        self.save_text().map(|_| ())
+    }
+
+    /// `save`, returning the exact text written (to recognise our own write).
+    pub fn save_text(&self) -> io::Result<String> {
         let path = path().ok_or_else(|| io::Error::other("no config dir"))?;
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir)?;
         }
         let text = serde_json::to_string_pretty(self).map_err(io::Error::other)?;
         let tmp = path.with_extension("json.tmp");
-        fs::write(&tmp, text)?;
-        fs::rename(&tmp, &path)
+        fs::write(&tmp, &text)?;
+        fs::rename(&tmp, &path)?;
+        Ok(text)
     }
 }
 
@@ -169,6 +181,12 @@ mod tests {
         let cfg = cfg.sanitized();
         assert_eq!(cfg.usage_interval_seconds, 5);
         assert_eq!(cfg.status_interval_seconds, 86_400);
+    }
+
+    #[test]
+    fn invalid_text_is_none_not_defaults() {
+        assert!(Config::parse("{\"warnPercent\": 5").is_none());
+        assert_eq!(Config::parse(r#"{"warnPercent": 50}"#).unwrap().warn_percent, 50);
     }
 
     #[test]

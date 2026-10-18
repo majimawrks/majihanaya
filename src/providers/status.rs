@@ -33,6 +33,11 @@ pub fn parse_summary_for(json: &str, relevant: fn(&str) -> bool) -> Option<(Stat
         .filter(|c| c.get("group").and_then(Value::as_bool) != Some(true) && relevant(&name(c)))
         .map(|c| c.get("status").and_then(Value::as_str).unwrap_or("operational").to_string())
         .collect();
+    // No relevant component at all: the page changed shape, not a healthy
+    // service. Report unavailable (keeping the last known status).
+    if statuses.is_empty() {
+        return None;
+    }
     let level = if statuses.iter().any(|s| s == "major_outage") {
         StatusLevel::Red
     } else if statuses.iter().any(|s| s != "operational") {
@@ -191,6 +196,8 @@ mod tests {
             parse_summary_for(&page("operational", "operational", inc), codex_relevant),
             Some((StatusLevel::Yellow, "Elevated Codex errors".into()))
         );
+        // A page without any Codex-relevant component is "unknown", not green.
+        assert_eq!(parse_summary_for(r#"{"status":{"indicator":"major"}}"#, codex_relevant), None);
         let other = r#"{"name":"Sora slow","status":"investigating","components":[{"name":"Sora"}]}"#;
         assert_eq!(parse_summary_for(&page("degraded_performance", "operational", other), codex_relevant).unwrap().0, StatusLevel::Green);
     }

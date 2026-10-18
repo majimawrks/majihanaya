@@ -109,6 +109,8 @@ struct App {
     ui: ui::WindowUi,
     errors: logfile::ErrorWatch,
     config_mtime: Option<std::time::SystemTime>,
+    /// The text of our last save, to tell our writes from outside edits.
+    last_written: Option<String>,
     config_checked: std::time::Instant,
     /// Content size last sent to the viewport.
     size: egui::Vec2,
@@ -175,6 +177,7 @@ impl App {
             ui,
             errors: Default::default(),
             config_mtime: config_mtime(),
+            last_written: None,
             config_checked: std::time::Instant::now(),
             size: egui::vec2(ui::COMPACT_W, 440.0),
             pos: None,
@@ -223,12 +226,14 @@ impl App {
         }
     }
 
-    /// Saves, publishes to the workers, and remembers the file's mtime so
-    /// our own write isn't mistaken for an outside edit.
+    /// Saves and publishes to the workers. Remembers the exact text written,
+    /// so our own write is never mistaken for an outside edit (and an outside
+    /// edit landing right after ours is never mistaken for ours).
     fn save_config(&mut self) {
-        let _ = self.config.save();
+        if let Ok(text) = self.config.save_text() {
+            self.last_written = Some(text);
+        }
         config::publish(&self.config);
-        self.config_mtime = config_mtime();
     }
 
     /// Picks up edits made to config.json while running (checked at most
@@ -242,11 +247,22 @@ impl App {
         if mtime.is_none() || mtime == self.config_mtime {
             return;
         }
+        // Unreadable right now (an editor holding it): try again next time.
+        let Some(text) = config::path().and_then(|p| std::fs::read_to_string(p).ok()) else { return };
         self.config_mtime = mtime;
-        let loaded = Config::load();
-        logfile::ERRORS.line("config.json changed on disk: reloaded");
-        let autostart = platform::autostart_enabled();
-        self.apply_settings(ctx, loaded, autostart, false);
+        if self.last_written.as_deref() == Some(text.as_str()) {
+            return;
+        }
+        match Config::parse(&text) {
+            Some(loaded) => {
+                logfile::ERRORS.line("config.json changed on disk: reloaded");
+                let autostart = platform::autostart_enabled();
+                self.apply_settings(ctx, loaded, autostart, false);
+            }
+            // Invalid (mid-save, a typo): keep the current settings; the
+            // next write changes the mtime and is looked at again.
+            None => logfile::ERRORS.line("config.json changed on disk but is not valid: kept current settings"),
+        }
     }
 
     /// `save`: false when the config came from the file itself (an outside

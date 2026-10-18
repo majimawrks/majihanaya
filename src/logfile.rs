@@ -38,9 +38,26 @@ impl LogFile {
     }
 
     pub(crate) fn append_at(&self, path: &Path, text: &str) {
+        // One record never takes more than a slice of a file.
+        let cap = (self.max_bytes / 16).max(256) as usize;
+        let text = if text.len() > cap {
+            let mut end = cap - 2;
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{}…\n", &text[..end])
+        } else {
+            text.to_owned()
+        };
         let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
-        if fs::metadata(path).is_ok_and(|m| m.len() + text.len() as u64 > self.max_bytes) {
+        let over = |p: &Path| fs::metadata(p).is_ok_and(|m| m.len() + text.len() as u64 > self.max_bytes);
+        if over(path) {
             self.rotate(path);
+            // Rotation can fail on Windows (another program holds the file):
+            // drop the line rather than let the file outgrow its cap.
+            if over(path) {
+                return;
+            }
         }
         if let Some(dir) = path.parent() {
             let _ = fs::create_dir_all(dir);
@@ -113,6 +130,9 @@ mod tests {
         assert!(files.iter().all(|f| f.metadata().unwrap().len() <= 4096));
         // The newest line is in the live file.
         assert!(fs::read_to_string(&p).unwrap().contains("line 01999"));
+        // One huge record is cut to a slice of the file, not written whole.
+        log.append_at(&p, &"x".repeat(100_000));
+        assert!(fs::metadata(&p).unwrap().len() <= 4096);
         let _ = fs::remove_dir_all(d);
     }
 }
