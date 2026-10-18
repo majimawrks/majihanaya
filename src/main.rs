@@ -41,6 +41,9 @@ fn main() -> eframe::Result {
         .with_resizable(false)
         .with_decorations(false)
         .with_transparent(true)
+        // Appear without taking focus: never steal the keyboard from
+        // whatever the user is typing in (a tray click still focuses it).
+        .with_active(false)
         .with_taskbar(false);
     if config.topmost {
         viewport = viewport.with_always_on_top();
@@ -104,7 +107,8 @@ struct App {
     size: egui::Vec2,
     /// Outer position we last placed or saw, and a drag-move awaiting save.
     pos: Option<egui::Pos2>,
-    pending_save: Option<std::time::Instant>,
+    /// Set when the user starts a title-bar drag; cleared once it is saved.
+    dragging: Option<std::time::Instant>,
 }
 
 impl App {
@@ -164,7 +168,7 @@ impl App {
             ui,
             size: egui::vec2(ui::COMPACT_W, 440.0),
             pos: None,
-            pending_save: None,
+            dragging: None,
         })
     }
 
@@ -187,24 +191,25 @@ impl App {
         }
     }
 
-    /// A move we didn't make is the user's drag: save it once it settles.
+    /// Saves the position after a title-bar drag, once the window stops
+    /// moving. Only drags count: our own fit/snap moves are never saved.
     fn track_position(&mut self, ctx: &egui::Context) {
         const SETTLE: std::time::Duration = std::time::Duration::from_millis(600);
         let Some(outer) = ctx.input(|i| i.viewport().outer_rect) else { return };
-        match self.pos {
-            None => self.pos = Some(outer.min),
-            Some(p) if (p - outer.min).length() > 0.5 => {
-                self.pos = Some(outer.min);
-                self.pending_save = Some(std::time::Instant::now());
-                ctx.request_repaint_after(SETTLE);
-            }
-            _ => {}
-        }
-        if self.pending_save.is_some_and(|t| t.elapsed() >= SETTLE) {
-            self.pending_save = None;
+        let Some(since) = self.dragging else { return };
+        if self.pos.is_some_and(|p| (p - outer.min).length() > 0.5) {
+            // Still moving: wait for it to settle.
+            self.pos = Some(outer.min);
+            self.dragging = Some(std::time::Instant::now());
+            ctx.request_repaint_after(SETTLE);
+        } else if since.elapsed() >= SETTLE {
+            self.dragging = None;
+            self.pos = Some(outer.min);
             self.config.left = Some(outer.min.x);
             self.config.top = Some(outer.min.y);
             let _ = self.config.save();
+        } else {
+            ctx.request_repaint_after(SETTLE);
         }
     }
 
@@ -289,7 +294,11 @@ impl eframe::App for App {
         for a in actions {
             match a {
                 ui::Action::Hide => self.window.hide(),
-                ui::Action::StartDrag => ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag),
+                ui::Action::StartDrag => {
+                    self.pos = ctx.input(|i| i.viewport().outer_rect).map(|r| r.min);
+                    self.dragging = Some(std::time::Instant::now());
+                    ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                }
                 ui::Action::OpenConfig => open_config_file(),
                 ui::Action::Apply(cfg, autostart) => self.apply_settings(&ctx, *cfg, autostart),
             }
