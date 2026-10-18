@@ -330,7 +330,7 @@ mod tests {
         s.claude.limits.model_weeks = vec![("Fable".into(), Limit { percent: 18, resets_at: None })];
         s.codex.presence = Presence::Found;
         s.codex.last_success = Some(now);
-        s.codex.windows = vec![CodexWindow { label: "week".into(), window_mins: Some(10080), percent: codex, resets_at: None }];
+        s.codex.windows = vec![CodexWindow { label: "week".into(), bucket: None, window_mins: Some(10080), percent: codex, resets_at: None }];
         s
     }
 

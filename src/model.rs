@@ -120,8 +120,12 @@ pub struct ClaudeState {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexWindow {
-    /// From `windowDurationMins`: 300 → "5-hour", 10080 → "week", else "N h".
+    /// From `windowDurationMins`: 300 → "5-hour", 10080 → "week", else "N h";
+    /// prefixed with the bucket's name for buckets other than the main one.
     pub label: String,
+    /// `None` for the main bucket (`rateLimits`); else the extra bucket's
+    /// `limitId` from `rateLimitsByLimitId`.
+    pub bucket: Option<String>,
     pub window_mins: Option<u32>,
     pub percent: f32,
     pub resets_at: Option<DateTime<Utc>>,

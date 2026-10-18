@@ -45,13 +45,12 @@ fn window_from(v: &Value, pct_key: &str, mins_key: &str, reset_key: &str) -> Opt
     let percent = v.get(pct_key)?.as_f64().filter(|p| p.is_finite())?.clamp(0.0, 100.0) as f32;
     let window_mins = v.get(mins_key).and_then(Value::as_u64).and_then(|m| u32::try_from(m).ok());
     let resets_at = v.get(reset_key).and_then(Value::as_i64).and_then(|s| DateTime::from_timestamp(s, 0));
-    Some(CodexWindow { label: window_label(window_mins), window_mins, percent, resets_at })
+    Some(CodexWindow { label: window_label(window_mins), bucket: None, window_mins, percent, resets_at })
 }
 
-/// The `result` of `account/rateLimits/read` (or a rateLimits notification's
-/// params). One window per non-null `primary`/`secondary`, labelled by duration.
-pub fn parse_rate_limits(result: &Value) -> Option<Vec<CodexWindow>> {
-    let limits = result.get("rateLimits")?.as_object()?;
+/// One bucket (`RateLimitSnapshot`): a window per non-null `primary`/`secondary`.
+fn snapshot_windows(snap: &Value) -> Option<Vec<CodexWindow>> {
+    let limits = snap.as_object()?;
     if !limits.contains_key("primary") && !limits.contains_key("secondary") {
         return None;
     }
@@ -62,6 +61,33 @@ pub fn parse_rate_limits(result: &Value) -> Option<Vec<CodexWindow>> {
         .filter(|v| !v.is_null())
         .map(|v| window_from(v, "usedPercent", "windowDurationMins", "resetsAt"))
         .collect()
+}
+
+/// The `result` of `account/rateLimits/read` (or a rateLimits notification's
+/// params): the main bucket's windows, labelled by duration, then any extra
+/// bucket from `rateLimitsByLimitId` (e.g. a per-model quota), prefixed with
+/// its name. Extra buckets that fail to parse are skipped, not fatal.
+pub fn parse_rate_limits(result: &Value) -> Option<Vec<CodexWindow>> {
+    let main = result.get("rateLimits")?;
+    let mut windows = snapshot_windows(main)?;
+    let main_id = main.get("limitId").and_then(Value::as_str);
+    if let Some(buckets) = result.get("rateLimitsByLimitId").and_then(Value::as_object) {
+        for (id, snap) in buckets {
+            if Some(id.as_str()) == main_id {
+                continue;
+            }
+            let name = ["limitName", "normalModelSlug"]
+                .iter()
+                .find_map(|k| snap.get(*k).and_then(Value::as_str))
+                .unwrap_or(id);
+            for mut w in snapshot_windows(snap).unwrap_or_default() {
+                w.label = format!("{name} {}", w.label);
+                w.bucket = Some(id.clone());
+                windows.push(w);
+            }
+        }
+    }
+    Some(windows)
 }
 
 /// The `result` of `account/read`. A null account gives `None`.
@@ -257,6 +283,14 @@ fn begin_attempt(state: &Shared) {
     lock(state).codex.last_attempt = Some(Utc::now());
 }
 
+/// Notifications carry only the main bucket: replace its windows, keep the
+/// extra buckets' windows from the last full read.
+fn merge_main(current: &[CodexWindow], main: Vec<CodexWindow>) -> Vec<CodexWindow> {
+    let mut out: Vec<CodexWindow> = main.into_iter().filter(|w| w.bucket.is_none()).collect();
+    out.extend(current.iter().filter(|w| w.bucket.is_some()).cloned());
+    out
+}
+
 fn write_windows(state: &Shared, windows: Vec<CodexWindow>) {
     let mut s = lock(state);
     s.codex.presence = Presence::Found;
@@ -405,7 +439,9 @@ impl Server {
     fn poll(&mut self, want_account: bool) -> Result<(), String> {
         begin_attempt(&self.state);
         self.col.notified = None;
-        let limits_id = self.request("account/rateLimits/read", None)?;
+        // Polls skip the reset-credit detail lookup (the schema's advice for
+        // background polls); the reply still carries the available count.
+        let limits_id = self.request("account/rateLimits/read", Some(json!({"excludeResetCreditDetails": true})))?;
         let account_id = if want_account { Some(self.request("account/read", Some(json!({})))?) } else { None };
         let mut ids = vec![limits_id];
         ids.extend(account_id);
@@ -426,8 +462,13 @@ impl Server {
             Ok(v) => parse_rate_limits(&v).ok_or_else(|| "unexpected response".to_string())?,
             Err(e) => return Err(e),
         };
-        // A rateLimits notification that arrived after the reply is newer.
-        write_windows(&self.state, self.col.notified.take().unwrap_or(windows));
+        // A rateLimits notification that arrived after the reply is newer
+        // (for the main bucket; extra buckets keep the reply's values).
+        let windows = match self.col.notified.take() {
+            Some(main) => merge_main(&windows, main),
+            None => windows,
+        };
+        write_windows(&self.state, windows);
         Ok(())
     }
 
@@ -444,8 +485,9 @@ impl Server {
             match self.rx.recv_timeout(left) {
                 Ok(line) => {
                     handle_line(&line, &mut self.col);
-                    if let Some(w) = self.col.notified.take() {
-                        write_windows(&self.state, w);
+                    if let Some(main) = self.col.notified.take() {
+                        let current = lock(&self.state).codex.windows.clone();
+                        write_windows(&self.state, merge_main(&current, main));
                         notify();
                     }
                 }
@@ -641,6 +683,25 @@ mod tests {
         let mut col = Collected::default();
         apply_lines(&format!("{reply}\n{}", note(20)), &mut col);
         assert_eq!(col.notified.unwrap()[0].percent, 20.0);
+    }
+
+    #[test]
+    fn extra_buckets_are_named_and_survive_notifications() {
+        let reply = json!({
+            "rateLimits": {"limitId": "codex", "primary": {"usedPercent": 2, "windowDurationMins": 10080}, "secondary": null},
+            "rateLimitsByLimitId": {
+                "codex": {"limitId": "codex", "primary": {"usedPercent": 2, "windowDurationMins": 10080}},
+                "luna": {"limitId": "luna", "limitName": "Luna", "primary": {"usedPercent": 40, "windowDurationMins": 300}},
+                "broken": {"limitId": "broken", "primary": {"usedPercent": "x"}}
+            }
+        });
+        let w = parse_rate_limits(&reply).unwrap();
+        let labels: Vec<_> = w.iter().map(|w| (w.label.as_str(), w.bucket.as_deref())).collect();
+        assert_eq!(labels, [("week", None), ("Luna 5-hour", Some("luna"))]);
+        // A notification (main bucket only) keeps the extra bucket.
+        let note = parse_rate_limits(&json!({"rateLimits": {"primary": {"usedPercent": 9, "windowDurationMins": 10080}}})).unwrap();
+        let merged = merge_main(&w, note);
+        assert_eq!((merged[0].percent, merged[1].label.as_str()), (9.0, "Luna 5-hour"));
     }
 
     #[test]

@@ -364,7 +364,7 @@ mod tests {
         s.codex.presence = Presence::Found;
         s.codex.source = CodexSource::AppServer;
         s.codex.last_success = Some(n);
-        s.codex.windows = vec![CodexWindow { label: "week".into(), window_mins: Some(10080), percent: 38.0, resets_at: None }];
+        s.codex.windows = vec![CodexWindow { label: "week".into(), bucket: None, window_mins: Some(10080), percent: 38.0, resets_at: None }];
         s
     }
 
