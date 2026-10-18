@@ -17,12 +17,18 @@ use tray_icon::TrayIconEvent;
 use tray_icon::menu::MenuEvent;
 
 fn main() -> eframe::Result {
+    if std::env::args().any(|a| a == "--dump") {
+        dump(&Config::load());
+        return Ok(());
+    }
+
     let Some(_instance) = platform::single_instance() else {
         platform::activate_existing();
         return Ok(());
     };
 
     let config = Config::load();
+    let state: model::Shared = Default::default();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(platform::WINDOW_TITLE)
@@ -35,12 +41,44 @@ fn main() -> eframe::Result {
     eframe::run_native(
         platform::WINDOW_TITLE,
         options,
-        Box::new(move |cc| Ok(Box::new(App::new(cc, config)?))),
+        Box::new(move |cc| {
+            let ctx = cc.egui_ctx.clone();
+            spawn_workers(&state, &config, Arc::new(move || ctx.request_repaint()));
+            Ok(Box::new(App::new(cc, config, state)?))
+        }),
     )
+}
+
+fn spawn_workers(state: &model::Shared, config: &Config, notify: model::Notify) {
+    use providers::*;
+    claude::spawn(state.clone(), config.clone(), notify.clone());
+    codex::spawn(state.clone(), config.clone(), notify.clone());
+    sessions::spawn(state.clone(), config.clone(), notify.clone());
+    status::spawn(state.clone(), config.clone(), notify.clone());
+    version::spawn(state.clone(), config.clone(), notify);
+}
+
+/// `--dump`: one refresh of every source, the state as JSON on stdout, exit.
+/// Works alongside a running instance (no single-instance check).
+fn dump(config: &Config) {
+    use providers::*;
+    platform::attach_parent_console();
+    let state: model::Shared = Default::default();
+    let refreshers: [fn(&model::Shared, &Config); 5] =
+        [claude::refresh, codex::refresh, sessions::refresh, status::refresh, version::refresh];
+    let state = &state;
+    std::thread::scope(|s| {
+        for refresh in refreshers {
+            s.spawn(move || refresh(&state, config));
+        }
+    });
+    let json = serde_json::to_string_pretty(&*state.lock().unwrap()).unwrap_or_default();
+    println!("{json}");
 }
 
 struct App {
     config: Config,
+    state: model::Shared,
     window: Window,
     /// Set by the tray's Exit; any other close request only hides the window.
     quitting: Arc<AtomicBool>,
@@ -48,7 +86,11 @@ struct App {
 }
 
 impl App {
-    fn new(cc: &eframe::CreationContext<'_>, config: Config) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    fn new(
+        cc: &eframe::CreationContext<'_>,
+        config: Config,
+        state: model::Shared,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let window = match cc.window_handle()?.as_raw() {
             RawWindowHandle::Win32(h) => Window::from_raw(h.hwnd.get()),
             _ => return Err("expected a Win32 window".into()),
@@ -81,7 +123,7 @@ impl App {
             }
         }));
 
-        Ok(Self { config, window, quitting, _tray: tray })
+        Ok(Self { config, state, window, quitting, _tray: tray })
     }
 }
 
@@ -95,8 +137,10 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ui, |ui| {
+            // Placeholder until M3 builds the real window from the design.
             ui.heading("majihanaya");
-            ui.label("Skeleton (M0). No data yet.");
+            let json = serde_json::to_string_pretty(&*self.state.lock().unwrap()).unwrap_or_default();
+            egui::ScrollArea::vertical().show(ui, |ui| ui.monospace(json));
         });
     }
 

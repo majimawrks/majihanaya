@@ -17,11 +17,8 @@ pub type Shared = Arc<Mutex<AppState>>;
 /// Wakes the UI after a worker changed `AppState`.
 pub type Notify = Arc<dyn Fn() + Send + Sync>;
 
-pub fn notify_none() -> Notify {
-    Arc::new(|| {})
-}
-
 #[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AppState {
     pub claude: ClaudeState,
     pub codex: CodexState,

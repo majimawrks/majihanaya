@@ -19,8 +19,8 @@ pub fn command(program: &Path) -> Command {
     cmd
 }
 
+/// Output of a finished child. Callers judge success by what they parse.
 pub struct Captured {
-    pub status_ok: bool,
     pub stdout: String,
     pub stderr: String,
 }
@@ -51,20 +51,17 @@ fn wait_capture(child: &mut Child, timeout: Duration) -> io::Result<Captured> {
         s
     });
     let deadline = Instant::now() + timeout;
-    let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break status;
-        }
+    while child.try_wait()?.is_none() {
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
             return Err(io::Error::new(io::ErrorKind::TimedOut, "child timed out"));
         }
         thread::sleep(Duration::from_millis(50));
-    };
+    }
     let stdout = String::from_utf8_lossy(&out_t.join().unwrap_or_default()).into_owned();
     let stderr = String::from_utf8_lossy(&err_t.join().unwrap_or_default()).into_owned();
-    Ok(Captured { status_ok: status.success(), stdout, stderr })
+    Ok(Captured { stdout, stderr })
 }
 
 /// First match for `name` on `PATH`, trying `.exe` then `.cmd` (an exact

@@ -11,6 +11,16 @@ use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 use windows::core::{HSTRING, w};
 use std::path::Path;
 
+/// Release builds have no console; reuse the parent's (the shell that ran
+/// `--dump`) so stdout reaches it. Harmless when there is none.
+pub fn attach_parent_console() {
+    use windows::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
+    // SAFETY: plain Win32 call; failure just means no console to attach.
+    unsafe {
+        let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+}
+
 /// Opens a file with the user's default handler for its type.
 pub fn open_file(path: &Path) {
     // SAFETY: Win32 call with owned, NUL-terminated strings that outlive it.
