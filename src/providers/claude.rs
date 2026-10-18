@@ -359,7 +359,7 @@ pub fn spawn(state: Shared, config: Config, notify: Notify) {
         loop {
             let _ = catch_unwind(AssertUnwindSafe(|| refresh(&state, &config)));
             let _ = catch_unwind(AssertUnwindSafe(|| notify()));
-            thread::sleep(Duration::from_secs(config.usage_interval_seconds.max(5)));
+            crate::model::REFRESH.sleep(Duration::from_secs(config.usage_interval_seconds.max(5)));
         }
     });
 }

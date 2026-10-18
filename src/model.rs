@@ -9,7 +9,7 @@
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, LazyLock, Mutex};
 use std::time::Duration;
 
 pub type Shared = Arc<Mutex<AppState>>;
@@ -215,6 +215,43 @@ pub struct VersionState {
     pub latest: Option<String>,
     pub channel: Option<String>,
     pub last_success: Option<DateTime<Utc>>,
+}
+
+/// "Refresh now": workers sleep through this instead of `thread::sleep`, so
+/// a tray click wakes them all at once. Hooks wake workers that wait on
+/// something else (the Codex worker's reply channel).
+pub struct Refresh {
+    epoch: Mutex<u64>,
+    cv: Condvar,
+    hooks: Mutex<Vec<Box<dyn Fn() -> bool + Send>>>,
+}
+
+pub static REFRESH: LazyLock<Refresh> =
+    LazyLock::new(|| Refresh { epoch: Mutex::new(0), cv: Condvar::new(), hooks: Mutex::new(Vec::new()) });
+
+impl Refresh {
+    pub fn epoch(&self) -> u64 {
+        *self.epoch.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Wakes every sleeping worker.
+    pub fn trigger(&self) {
+        *self.epoch.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+        self.cv.notify_all();
+        // A hook returning false is dead (its worker is gone) and is dropped.
+        self.hooks.lock().unwrap_or_else(|e| e.into_inner()).retain(|h| h());
+    }
+
+    pub fn add_hook(&self, hook: Box<dyn Fn() -> bool + Send>) {
+        self.hooks.lock().unwrap_or_else(|e| e.into_inner()).push(hook);
+    }
+
+    /// Sleeps up to `dur`; returns early when `trigger` is called.
+    pub fn sleep(&self, dur: Duration) {
+        let guard = self.epoch.lock().unwrap_or_else(|e| e.into_inner());
+        let start = *guard;
+        let _ = self.cv.wait_timeout_while(guard, dur, |e| *e == start);
+    }
 }
 
 /// Stale when the last success is older than `3 × interval + 30 s` (or never).

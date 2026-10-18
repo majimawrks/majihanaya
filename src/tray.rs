@@ -1,43 +1,111 @@
-//! Tray icon and its menu. M0: placeholder icon; real rendering arrives in M2.
+//! Tray icon and its menu. What it shows comes from `trayview`; this module
+//! only owns the Win32-side objects, which must stay on the UI thread.
 
-use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
+use crate::trayview::{self, View};
+use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
-const SIZE: u32 = 32;
-const NO_DATA: [u8; 3] = [0x6B, 0x72, 0x80];
-
-pub struct Tray {
-    // Dropping the icon removes it from the tray, so it lives as long as the app.
-    _icon: TrayIcon,
-    pub open_config: MenuId,
-    pub exit: MenuId,
+#[derive(Clone)]
+pub struct Ids {
+    refresh: MenuId,
+    larger: MenuId,
+    smaller: MenuId,
+    open_config: MenuId,
+    autostart: MenuId,
+    exit: MenuId,
 }
 
 pub enum Action {
     Toggle,
+    Refresh,
+    Larger,
+    Smaller,
     OpenConfig,
+    /// The menu has already flipped the check mark; read it with `autostart_checked`.
+    Autostart,
     Exit,
 }
 
+pub struct Tray {
+    // Dropping the icon removes it from the tray, so it lives as long as the app.
+    icon: TrayIcon,
+    autostart: CheckMenuItem,
+    pub ids: Ids,
+    size: u32,
+    /// Last drawn (text, level, size) and tooltip, so unchanged state costs nothing.
+    shown: Option<(String, trayview::Level, u32)>,
+    tip: String,
+}
+
 impl Tray {
-    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(autostart_on: bool) -> Result<Self, Box<dyn std::error::Error>> {
+        let refresh = MenuItem::new("Refresh now", true, None);
+        let larger = MenuItem::new("Larger", true, None);
+        let smaller = MenuItem::new("Smaller", true, None);
         let open_config = MenuItem::new("Open config", true, None);
+        let autostart = CheckMenuItem::new("Start with Windows", true, autostart_on, None);
         let exit = MenuItem::new("Exit", true, None);
         let menu = Menu::new();
-        menu.append_items(&[&open_config, &PredefinedMenuItem::separator(), &exit])?;
+        menu.append_items(&[
+            &refresh,
+            &PredefinedMenuItem::separator(),
+            &larger,
+            &smaller,
+            &PredefinedMenuItem::separator(),
+            &open_config,
+            &autostart,
+            &PredefinedMenuItem::separator(),
+            &exit,
+        ])?;
 
+        let size = crate::platform::tray_icon_size();
         let icon = TrayIconBuilder::new()
-            .with_icon(placeholder_icon())
+            .with_icon(render("--", trayview::Level::NoData, size))
             .with_tooltip("majihanaya")
             .with_menu(Box::new(menu))
             .with_menu_on_left_click(false)
             .build()?;
 
-        Ok(Self { _icon: icon, open_config: open_config.id().clone(), exit: exit.id().clone() })
+        let ids = Ids {
+            refresh: refresh.id().clone(),
+            larger: larger.id().clone(),
+            smaller: smaller.id().clone(),
+            open_config: open_config.id().clone(),
+            autostart: autostart.id().clone(),
+            exit: exit.id().clone(),
+        };
+        Ok(Self { icon, autostart, ids, size, shown: None, tip: String::new() })
+    }
+
+    /// Redraws the icon and tooltip only when they changed.
+    pub fn update(&mut self, view: &View, tooltip: String) {
+        let key = (view.text.clone(), view.level, self.size);
+        if self.shown.as_ref() != Some(&key) {
+            let _ = self.icon.set_icon(Some(render(&view.text, view.level, self.size)));
+            self.shown = Some(key);
+        }
+        if tooltip != self.tip {
+            let _ = self.icon.set_tooltip(Some(&tooltip));
+            self.tip = tooltip;
+        }
+    }
+
+    pub fn autostart_checked(&self) -> bool {
+        self.autostart.is_checked()
+    }
+
+    /// Puts the check mark back when the change it asked for failed.
+    pub fn set_autostart_checked(&self, on: bool) {
+        self.autostart.set_checked(on);
     }
 }
 
-/// Maps a raw tray/menu event to what the app should do, if anything.
+fn render(text: &str, level: trayview::Level, size: u32) -> Icon {
+    let (rgba, s) = trayview::icon_rgba(text, level, size);
+    Icon::from_rgba(rgba, s, s).expect("valid icon size")
+}
+
+/// Maps a raw tray event to what the app should do, if anything.
 pub fn tray_action(event: &TrayIconEvent) -> Option<Action> {
     match event {
         TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } => {
@@ -47,30 +115,21 @@ pub fn tray_action(event: &TrayIconEvent) -> Option<Action> {
     }
 }
 
-pub fn menu_action(event: &MenuEvent, open_config: &MenuId, exit: &MenuId) -> Option<Action> {
-    if &event.id == open_config {
-        Some(Action::OpenConfig)
-    } else if &event.id == exit {
-        Some(Action::Exit)
+pub fn menu_action(event: &MenuEvent, ids: &Ids) -> Option<Action> {
+    let id = &event.id;
+    Some(if id == &ids.refresh {
+        Action::Refresh
+    } else if id == &ids.larger {
+        Action::Larger
+    } else if id == &ids.smaller {
+        Action::Smaller
+    } else if id == &ids.open_config {
+        Action::OpenConfig
+    } else if id == &ids.autostart {
+        Action::Autostart
+    } else if id == &ids.exit {
+        Action::Exit
     } else {
-        None
-    }
-}
-
-/// A grey "no data" disc.
-fn placeholder_icon() -> Icon {
-    let mut rgba = vec![0u8; (SIZE * SIZE * 4) as usize];
-    let c = (SIZE as f32 - 1.0) / 2.0;
-    let r = SIZE as f32 / 2.0 - 1.0;
-    for y in 0..SIZE {
-        for x in 0..SIZE {
-            let d = ((x as f32 - c).powi(2) + (y as f32 - c).powi(2)).sqrt();
-            // One pixel of anti-aliasing at the edge.
-            let a = (r - d + 0.5).clamp(0.0, 1.0);
-            let i = ((y * SIZE + x) * 4) as usize;
-            rgba[i..i + 3].copy_from_slice(&NO_DATA);
-            rgba[i + 3] = (a * 255.0) as u8;
-        }
-    }
-    Icon::from_rgba(rgba, SIZE, SIZE).expect("valid icon size")
+        return None;
+    })
 }

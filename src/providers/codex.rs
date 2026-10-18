@@ -330,6 +330,9 @@ impl Server {
         // Bounded: if we fall behind, the child waits on its pipe instead of
         // our memory growing.
         let (tx, rx) = mpsc::sync_channel(256);
+        // "Refresh now" wakes `idle` with an empty line (ignored as input).
+        let wake = tx.clone();
+        REFRESH.add_hook(Box::new(move || !matches!(wake.try_send(String::new()), Err(mpsc::TrySendError::Disconnected(_)))));
         thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
             let mut buf = Vec::new();
@@ -432,9 +435,10 @@ impl Server {
     /// Errors when the child's stdout closes.
     fn idle(&mut self, dur: Duration, notify: &Notify) -> Result<(), String> {
         let deadline = Instant::now() + dur;
+        let epoch = REFRESH.epoch();
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() {
+            if left.is_zero() || REFRESH.epoch() != epoch {
                 return Ok(());
             }
             match self.rx.recv_timeout(left) {
@@ -492,7 +496,7 @@ pub fn spawn(state: Shared, config: Config, notify: Notify) {
             }
             failures = failures.saturating_add(1);
             let backoff = interval.saturating_mul(1u32 << (failures - 1).min(10)).min(MAX_BACKOFF);
-            thread::sleep(backoff);
+            REFRESH.sleep(backoff);
         }
     });
 }

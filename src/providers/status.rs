@@ -83,7 +83,7 @@ pub fn spawn(state: Shared, config: Config, notify: Notify) {
                 refresh(&state, &config);
                 notify();
             }));
-            thread::sleep(interval);
+            crate::model::REFRESH.sleep(interval);
         }
     });
 }

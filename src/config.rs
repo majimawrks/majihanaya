@@ -6,6 +6,19 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 
+/// Which usage window the tray icon's number shows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TrayNumber {
+    /// Highest % among all live windows (design default).
+    #[default]
+    Worst,
+    ClaudeSession,
+    ClaudeWeek,
+    /// Worst Codex window.
+    Codex,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Config {
@@ -28,6 +41,7 @@ pub struct Config {
     pub opacity: f32,
     pub topmost: bool,
     pub expanded: bool,
+    pub tray_number: TrayNumber,
     pub tray_reset_clock: bool,
     pub language: String,
     pub left: Option<f32>,
@@ -59,6 +73,7 @@ impl Default for Config {
             opacity: 1.0,
             topmost: false,
             expanded: false,
+            tray_number: TrayNumber::Worst,
             tray_reset_clock: false,
             language: "en".into(),
             left: None,

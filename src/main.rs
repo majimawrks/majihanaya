@@ -6,12 +6,13 @@ mod platform;
 mod proc;
 mod providers;
 mod tray;
+mod trayview;
 
 use config::Config;
 use eframe::egui;
 use platform::Window;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 use std::sync::atomic::{AtomicBool, Ordering};
 use tray_icon::TrayIconEvent;
 use tray_icon::menu::MenuEvent;
@@ -29,14 +30,19 @@ fn main() -> eframe::Result {
 
     let config = Config::load();
     let state: model::Shared = Default::default();
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title(platform::WINDOW_TITLE)
-            .with_inner_size([340.0, 420.0])
-            .with_resizable(false)
-            .with_taskbar(false),
-        ..Default::default()
-    };
+    // Placeholder size until M3; 320 × 440 is the design's compact window.
+    let size = [320.0, 440.0];
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title(platform::WINDOW_TITLE)
+        .with_inner_size(size)
+        .with_resizable(false)
+        .with_taskbar(false);
+    // Saved drag position wins (M3); otherwise sit beside the tray.
+    let saved = config.left.zip(config.top).map(|(x, y)| [x, y]);
+    if let Some(pos) = saved.or_else(|| platform::default_position(size)) {
+        viewport = viewport.with_position(pos);
+    }
+    let options = eframe::NativeOptions { viewport, ..Default::default() };
 
     eframe::run_native(
         platform::WINDOW_TITLE,
@@ -44,7 +50,7 @@ fn main() -> eframe::Result {
         Box::new(move |cc| {
             let ctx = cc.egui_ctx.clone();
             spawn_workers(&state, &config, Arc::new(move || ctx.request_repaint()));
-            Ok(Box::new(App::new(cc, state)?))
+            Ok(Box::new(App::new(cc, config, state)?))
         }),
     )
 }
@@ -77,29 +83,37 @@ fn dump(config: &Config) {
 }
 
 struct App {
+    config: Config,
     state: model::Shared,
     window: Window,
     /// Set by the tray's Exit; any other close request only hides the window.
     quitting: Arc<AtomicBool>,
-    _tray: tray::Tray,
+    tray: tray::Tray,
+    /// Menu actions that need `App` (config, tray); drained in `logic`.
+    actions: mpsc::Receiver<tray::Action>,
 }
 
 impl App {
     fn new(
         cc: &eframe::CreationContext<'_>,
+        config: Config,
         state: model::Shared,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let window = match cc.window_handle()?.as_raw() {
             RawWindowHandle::Win32(h) => Window::from_raw(h.hwnd.get()),
             _ => return Err("expected a Win32 window".into()),
         };
+        cc.egui_ctx.set_zoom_factor(config.scale);
+        if config.left.is_none() || config.top.is_none() {
+            window.snap_to_tray_corner();
+        }
 
         // Tray must be created on this (the event loop's) thread.
-        let tray = tray::Tray::new().map_err(|e| e.to_string())?;
+        let tray = tray::Tray::new(platform::autostart_enabled()).map_err(|e| e.to_string())?;
         let quitting = Arc::new(AtomicBool::new(false));
 
-        // Handlers act on the window directly: eframe runs no ui pass while the
-        // window is hidden, and these must work then too.
+        // Handlers act on the window directly where they can: eframe runs no
+        // ui pass while the window is hidden, and these must work then too.
         let ctx = cc.egui_ctx.clone();
         TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
             if let Some(tray::Action::Toggle) = tray::tray_action(&event) {
@@ -108,20 +122,43 @@ impl App {
             }
         }));
 
-        let (open_config, exit) = (tray.open_config.clone(), tray.exit.clone());
-        let quit = quitting.clone();
-        MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
-            match tray::menu_action(&event, &open_config, &exit) {
-                Some(tray::Action::OpenConfig) => open_config_file(),
-                Some(tray::Action::Exit) => {
-                    quit.store(true, Ordering::SeqCst);
-                    window.post_close();
-                }
-                _ => {}
+        let (tx, actions) = mpsc::channel();
+        let (ids, quit, ctx) = (tray.ids.clone(), quitting.clone(), cc.egui_ctx.clone());
+        MenuEvent::set_event_handler(Some(move |event: MenuEvent| match tray::menu_action(&event, &ids) {
+            Some(tray::Action::Refresh) => model::REFRESH.trigger(),
+            Some(tray::Action::OpenConfig) => open_config_file(),
+            Some(tray::Action::Exit) => {
+                quit.store(true, Ordering::SeqCst);
+                window.post_close();
             }
+            Some(other) => {
+                // `logic` runs on request_repaint even while the window is hidden.
+                let _ = tx.send(other);
+                ctx.request_repaint();
+            }
+            None => {}
         }));
 
-        Ok(Self { state, window, quitting, _tray: tray })
+        Ok(Self { config, state, window, quitting, tray, actions })
+    }
+
+    fn handle(&mut self, ctx: &egui::Context, action: tray::Action) {
+        match action {
+            tray::Action::Larger | tray::Action::Smaller => {
+                let step = if matches!(action, tray::Action::Larger) { 0.1 } else { -0.1 };
+                // Rounded so repeated steps don't drift (1.0999…).
+                self.config.scale = ((self.config.scale + step) * 10.0).round().clamp(7.5, 20.0) / 10.0;
+                ctx.set_zoom_factor(self.config.scale);
+                let _ = self.config.save();
+            }
+            tray::Action::Autostart => {
+                let want = self.tray.autostart_checked();
+                if platform::set_autostart(want).is_err() {
+                    self.tray.set_autostart_checked(!want);
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -131,6 +168,22 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.window.hide();
         }
+        while let Ok(action) = self.actions.try_recv() {
+            self.handle(ctx, action);
+        }
+
+        let now = chrono::Utc::now();
+        let (view, tip) = {
+            let s = model::lock(&self.state);
+            let view = trayview::view(&s, &self.config, now);
+            let tip = trayview::tooltip(&view, self.config.tray_reset_clock, now);
+            (view, tip)
+        };
+        self.tray.update(&view, tip);
+        // Countdowns and staleness move with the clock: look again at the next
+        // minute boundary (one wakeup a minute, hidden or not).
+        let secs = 60 - (now.timestamp().rem_euclid(60)) as u64;
+        ctx.request_repaint_after(std::time::Duration::from_secs(secs));
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
