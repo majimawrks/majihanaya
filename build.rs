@@ -41,7 +41,7 @@ BEGIN
             VALUE "FileDescription", "majihanaya"
             VALUE "FileVersion", "{version}"
             VALUE "InternalName", "majihanaya"
-            VALUE "LegalCopyright", "© 2026 majimawrks. MIT License."
+            VALUE "LegalCopyright", "© 2026 majimawrks. GPL-3.0-or-later."
             VALUE "OriginalFilename", "majihanaya.exe"
             VALUE "ProductName", "majihanaya"
             VALUE "ProductVersion", "{version}"
