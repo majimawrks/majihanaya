@@ -1,0 +1,21 @@
+You are currently using your subscription to power your Claude Code usage
+
+Current session: 16% used · resets Oct 18, 8:10pm (Asia/Jakarta)
+Current week (all models): 9% used · resets Oct 22, 7pm (Asia/Jakarta)
+
+What's contributing to your limits usage?
+Approximate, based on local sessions on this machine — does not include other devices or claude.ai. Behaviors are independent characteristics, not a breakdown.
+
+Last 24h · 69 requests · 2 sessions
+  70% of your usage was at >150k context
+  37% of your usage went to always-on context over 40k tokens
+  Top skills: /chief-delegate 19%
+  Top MCP servers: ccd_turn 23%
+
+Last 7d · 218 requests · 3 sessions
+  53% of your usage was at >150k context
+  39% of your usage went to always-on context over 40k tokens
+  22% of your usage came from subagent-heavy sessions
+  Top skills: /chief-delegate 9%
+  Top subagents: chief-delegate 1%
+  Top MCP servers: ccd_turn 21%, Claude Browser 1%

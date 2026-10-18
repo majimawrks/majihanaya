@@ -1,7 +1,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod config;
+mod model;
 mod platform;
+mod proc;
+mod providers;
 mod tray;
 
 use config::Config;
