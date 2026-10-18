@@ -14,6 +14,12 @@ use std::time::Duration;
 
 pub type Shared = Arc<Mutex<AppState>>;
 
+/// Locks the state, recovering from a poisoned mutex: a worker that panicked
+/// mid-write must not take the UI and the other workers down with it.
+pub fn lock(state: &Shared) -> std::sync::MutexGuard<'_, AppState> {
+    state.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Wakes the UI after a worker changed `AppState`.
 pub type Notify = Arc<dyn Fn() + Send + Sync>;
 

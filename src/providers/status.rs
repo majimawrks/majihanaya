@@ -64,7 +64,8 @@ pub fn fetch_summary(url: &str) -> Result<(StatusLevel, String), String> {
 
 pub fn refresh(state: &Shared, _config: &Config) {
     let result = fetch_summary(CLAUDE_SUMMARY_URL);
-    if let Ok(mut s) = state.lock() {
+    {
+        let mut s = lock(state);
         match result {
             Ok((level, text)) => {
                 s.claude_status = ServiceStatus { level, text, last_success: Some(Utc::now()), error: None };

@@ -80,7 +80,7 @@ impl Config {
             return Self::default();
         };
         match fs::read_to_string(&path) {
-            Ok(text) => serde_json::from_str(text.trim_start_matches('\u{feff}')).unwrap_or_default(),
+            Ok(text) => serde_json::from_str::<Self>(text.trim_start_matches('\u{feff}')).unwrap_or_default().sanitized(),
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 let cfg = Self::default();
                 let _ = cfg.save();
@@ -88,6 +88,25 @@ impl Config {
             }
             Err(_) => Self::default(),
         }
+    }
+
+    /// Clamps values a hand-edited file could make dangerous (zero or huge
+    /// intervals). Applied on load, so the clamped values are what gets saved.
+    pub fn sanitized(mut self) -> Self {
+        const DAY: u64 = 86_400;
+        for v in [
+            &mut self.usage_interval_seconds,
+            &mut self.codex_interval_seconds,
+            &mut self.account_interval_seconds,
+            &mut self.status_interval_seconds,
+            &mut self.version_interval_seconds,
+            &mut self.sessions_interval_seconds,
+        ] {
+            *v = (*v).clamp(5, DAY);
+        }
+        self.warn_percent = self.warn_percent.min(100);
+        self.crit_percent = self.crit_percent.clamp(self.warn_percent, 100);
+        self
     }
 
     /// Writes to a temp file then renames, so a crash never leaves half a file.
@@ -115,6 +134,15 @@ mod tests {
         let out: Value = serde_json::to_value(&cfg).unwrap();
         assert_eq!(out["futureKey"]["a"], 1);
         assert_eq!(out["warnPercent"], 50);
+    }
+
+    #[test]
+    fn sanitize_clamps_intervals() {
+        let cfg: Config =
+            serde_json::from_str(r#"{"usageIntervalSeconds":0,"statusIntervalSeconds":18446744073709551615}"#).unwrap();
+        let cfg = cfg.sanitized();
+        assert_eq!(cfg.usage_interval_seconds, 5);
+        assert_eq!(cfg.status_interval_seconds, 86_400);
     }
 
     #[test]

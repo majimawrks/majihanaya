@@ -50,13 +50,16 @@ fn window_from(v: &Value, pct_key: &str, mins_key: &str, reset_key: &str) -> Opt
 /// params). One window per non-null `primary`/`secondary`, labelled by duration.
 pub fn parse_rate_limits(result: &Value) -> Option<Vec<CodexWindow>> {
     let limits = result.get("rateLimits")?.as_object()?;
-    let windows = ["primary", "secondary"]
+    if !limits.contains_key("primary") && !limits.contains_key("secondary") {
+        return None;
+    }
+    // Present but unparseable → unknown shape: fail rather than show "no windows".
+    ["primary", "secondary"]
         .iter()
         .filter_map(|k| limits.get(*k))
         .filter(|v| !v.is_null())
-        .filter_map(|v| window_from(v, "usedPercent", "windowDurationMins", "resetsAt"))
-        .collect();
-    Some(windows)
+        .map(|v| window_from(v, "usedPercent", "windowDurationMins", "resetsAt"))
+        .collect()
 }
 
 /// The `result` of `account/read`. A null account gives `None`.
@@ -236,10 +239,6 @@ fn rollout_snapshot() -> Option<(DateTime<Utc>, Vec<CodexWindow>)> {
 // State writes
 // ---------------------------------------------------------------------------
 
-fn lock(state: &Shared) -> std::sync::MutexGuard<'_, AppState> {
-    state.lock().unwrap_or_else(|e| e.into_inner())
-}
-
 fn begin_attempt(state: &Shared) {
     lock(state).codex.last_attempt = Some(Utc::now());
 }
@@ -273,7 +272,8 @@ fn fall_back(state: &Shared, err: &str) {
             s.codex.windows = windows;
             s.codex.source = CodexSource::Rollout;
             s.codex.source_time = Some(time);
-            s.codex.last_success = Some(Utc::now());
+            // The data is as old as the log entry, so staleness follows it.
+            s.codex.last_success = Some(time);
             s.codex.error = None;
         }
         None => write_failure(state, &format!("Codex: unavailable ({err})")),
@@ -301,6 +301,7 @@ impl Server {
             .stdin(Stdio::piped())
             .spawn()
             .map_err(|e| format!("cannot start codex: {}", e.kind()))?;
+        proc::adopt(&child);
         let pid = child.id();
         lock(state).own_pids.insert(pid);
         let (Some(stdin), Some(stdout), Some(stderr)) = (child.stdin.take(), child.stdout.take(), child.stderr.take())
@@ -583,7 +584,11 @@ mod tests {
             assert!(parse_account(&v).is_none());
         }
         assert!(parse_account(&json!({"account":null})).is_none());
-        assert_eq!(parse_rate_limits(&json!({"rateLimits":{"primary":{"usedPercent":"x"}}})).unwrap().len(), 0);
+        // A present but unparseable window is an unknown shape, not "no windows".
+        assert!(parse_rate_limits(&json!({"rateLimits":{"primary":{"usedPercent":"x"}}})).is_none());
+        assert!(parse_rate_limits(&json!({"rateLimits":{"other":1}})).is_none());
+        // Both windows explicitly null is a real, empty answer.
+        assert_eq!(parse_rate_limits(&json!({"rateLimits":{"primary":null,"secondary":null}})).unwrap().len(), 0);
         let mut col = Collected::default();
         apply_lines("garbage\n{\"id\":\"x\"}\n[1]\n\n{\"id\":9,\"error\":{\"message\":\"no auth\"}}", &mut col);
         assert_eq!(col.take(9), Some(Err("no auth".into())));

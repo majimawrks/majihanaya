@@ -72,7 +72,7 @@ fn dump(config: &Config) {
             s.spawn(move || refresh(&state, config));
         }
     });
-    let json = serde_json::to_string_pretty(&*state.lock().unwrap()).unwrap_or_default();
+    let json = serde_json::to_string_pretty(&*model::lock(state)).unwrap_or_default();
     println!("{json}");
 }
 
@@ -139,7 +139,7 @@ impl eframe::App for App {
         egui::CentralPanel::default().show(ui, |ui| {
             // Placeholder until M3 builds the real window from the design.
             ui.heading("majihanaya");
-            let json = serde_json::to_string_pretty(&*self.state.lock().unwrap()).unwrap_or_default();
+            let json = serde_json::to_string_pretty(&*model::lock(&self.state)).unwrap_or_default();
             egui::ScrollArea::vertical().show(ui, |ui| ui.monospace(json));
         });
     }

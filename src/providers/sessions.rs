@@ -100,10 +100,15 @@ fn sessions_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".claude").join("sessions"))
 }
 
-fn read_all(state: &Shared) -> Vec<Session> {
-    let Some(dir) = sessions_dir() else { return Vec::new() };
-    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
-    let own = state.lock().map(|s| s.own_pids.clone()).unwrap_or_default();
+/// `None` when the folder exists but can't be read: keep the previous list.
+fn read_all(state: &Shared) -> Option<Vec<Session>> {
+    let Some(dir) = sessions_dir() else { return Some(Vec::new()) };
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(Vec::new()),
+        Err(_) => return None,
+    };
+    let own = lock(state).own_pids.clone();
     let mut list = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
@@ -122,13 +127,12 @@ fn read_all(state: &Shared) -> Vec<Session> {
         }
     }
     sort_sessions(&mut list);
-    list
+    Some(list)
 }
 
 pub fn refresh(state: &Shared, _config: &Config) {
-    let list = read_all(state);
-    if let Ok(mut s) = state.lock() {
-        s.sessions = SessionsState { list, last_success: Some(Utc::now()) };
+    if let Some(list) = read_all(state) {
+        lock(state).sessions = SessionsState { list, last_success: Some(Utc::now()) };
     }
 }
 

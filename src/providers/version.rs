@@ -39,7 +39,7 @@ fn read_channel() -> String {
 }
 
 fn local_version(state: &Shared) -> Option<String> {
-    let path = proc::find_on_path("claude")?;
+    let path = super::claude::resolve_cli()?;
     let out = proc::run_capture(state, &path, &["--version"], Duration::from_secs(15)).ok()?;
     parse_version(&out.stdout)
 }
@@ -60,8 +60,11 @@ pub fn refresh(state: &Shared, _config: &Config) {
     let channel = read_channel();
     let local = local_version(state);
     let latest = fetch_latest(&channel).ok();
-    if let Ok(mut s) = state.lock() {
-        s.version.local = local;
+    {
+        let mut s = lock(state);
+        if local.is_some() {
+            s.version.local = local;
+        }
         s.version.channel = Some(channel);
         if let Some(l) = latest {
             s.version.latest = Some(l);

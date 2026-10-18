@@ -273,7 +273,7 @@ pub fn refresh(state: &Shared, config: &Config) {
         if due {
             LAST_AUTH_ATTEMPT.store(now.timestamp(), Ordering::Relaxed);
             if let Some(acc) = probe_auth(state, cli) {
-                state.lock().unwrap().claude.account = Some(acc);
+                lock(state).claude.account = Some(acc);
             }
         }
     }
@@ -286,7 +286,7 @@ pub fn refresh(state: &Shared, config: &Config) {
     let now = Utc::now();
     match result {
         Ok(limits) => {
-            let mut s = state.lock().unwrap();
+            let mut s = lock(state);
             let c = &mut s.claude;
             c.presence = Presence::Found;
             c.limits = limits;
@@ -298,7 +298,7 @@ pub fn refresh(state: &Shared, config: &Config) {
         }
         Err(err) => {
             let (cli_fresh, cli_org) = {
-                let s = state.lock().unwrap();
+                let s = lock(state);
                 let c = &s.claude;
                 (
                     c.source == ClaudeSource::Cli && !is_stale(c.last_success, usage_interval, now),
@@ -308,7 +308,7 @@ pub fn refresh(state: &Shared, config: &Config) {
             let sample = if config.use_desktop_fallback && !cli_fresh { desktop_sample() } else { None };
             let decision =
                 decide_fallback(config.use_desktop_fallback, cli_fresh, sample.as_ref(), cli_org.as_deref(), now);
-            let mut s = state.lock().unwrap();
+            let mut s = lock(state);
             let c = &mut s.claude;
             c.presence = if cli.is_some() { Presence::Found } else { Presence::Missing };
             c.last_attempt = Some(now);
@@ -321,7 +321,8 @@ pub fn refresh(state: &Shared, config: &Config) {
                     };
                     c.source = ClaudeSource::Desktop;
                     c.org_mismatch = false;
-                    c.last_success = Some(now);
+                    // As old as the sample, so staleness follows it.
+                    c.last_success = sample.as_ref().map(|s| s.0).or(Some(now));
                     c.error = None;
                 }
                 Fallback::OrgMismatch => {
