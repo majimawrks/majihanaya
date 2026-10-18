@@ -154,16 +154,20 @@ fn status_look(s: &ServiceStatus) -> (Color32, String) {
     }
 }
 
-/// Right-hand text of a session row: BUSY, what it waits for, DESKTOP or CLI.
+/// Claude Desktop runs all its sessions in one process, so its registry
+/// entry stands for every Desktop session (named after the latest one).
+fn is_desktop(s: &Session) -> bool {
+    s.entrypoint.as_deref().is_some_and(|e| e.to_lowercase().contains("desktop"))
+}
+
+/// Right-hand text of a session row: BUSY, what it waits for, IDLE or CLI.
 fn session_meta(s: &Session) -> String {
     match &s.status {
         SessionStatus::Working => "BUSY".into(),
         SessionStatus::Waiting(Some(what)) if !what.is_empty() => what.to_uppercase(),
         SessionStatus::Waiting(_) => "WAITING".into(),
-        SessionStatus::Idle => {
-            let desktop = s.entrypoint.as_deref().is_some_and(|e| e.to_lowercase().contains("desktop"));
-            if desktop { "DESKTOP" } else { "CLI" }.into()
-        }
+        // The Desktop row already says DESKTOP in its name.
+        SessionStatus::Idle => if is_desktop(s) { "IDLE" } else { "CLI" }.into(),
     }
 }
 
@@ -203,8 +207,17 @@ fn session_row(p: &Painter, row: Rect, s: &Session, blink_on: bool) {
     text(p, pos2(x0, mid), Align2::LEFT_CENTER, tag, vt(17.0), tag_fg, 0.0);
     let meta = text(p, pos2(x1, mid), Align2::RIGHT_CENTER, &session_meta(s), vt(16.0), meta_fg, 0.0);
     let name_x = x0 + 50.0 + 8.0;
-    let name = fit(p, &s.name, &mono(11.0), meta.left() - 8.0 - name_x);
-    text(p, pos2(name_x, mid), Align2::LEFT_CENTER, &name, mono(11.0), name_fg, 0.0);
+    let room = meta.left() - 8.0 - name_x;
+    if is_desktop(s) {
+        // "CLAUDE DESKTOP · Plan review": one shared row, latest conversation dimmed.
+        let lead = text(p, pos2(name_x, mid), Align2::LEFT_CENTER, "CLAUDE DESKTOP", vt(17.0), name_fg, 1.0);
+        let x = lead.right() + 6.0;
+        let rest = fit(p, &format!("· {}", s.name), &mono(11.0), meta.left() - 8.0 - x);
+        text(p, pos2(x, mid), Align2::LEFT_CENTER, &rest, mono(11.0), chrome::MUTED, 0.0);
+    } else {
+        let name = fit(p, &s.name, &mono(11.0), room);
+        text(p, pos2(name_x, mid), Align2::LEFT_CENTER, &name, mono(11.0), name_fg, 0.0);
+    }
 }
 
 struct ClockRow {
@@ -339,7 +352,7 @@ mod tests {
         let s = |status, entrypoint: Option<&str>| Session { pid: 1, name: "x".into(), status, cwd: None, entrypoint: entrypoint.map(Into::into) };
         assert_eq!(session_meta(&s(SessionStatus::Working, None)), "BUSY");
         assert_eq!(session_meta(&s(SessionStatus::Waiting(Some("permission".into())), None)), "PERMISSION");
-        assert_eq!(session_meta(&s(SessionStatus::Idle, Some("claude-desktop"))), "DESKTOP");
+        assert_eq!(session_meta(&s(SessionStatus::Idle, Some("claude-desktop"))), "IDLE");
         assert_eq!(session_meta(&s(SessionStatus::Idle, None)), "CLI");
     }
 }
