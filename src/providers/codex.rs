@@ -23,6 +23,8 @@ const ACCOUNT_INTERVAL: Duration = Duration::from_secs(600);
 const MAX_BACKOFF: Duration = Duration::from_secs(600);
 /// How much of the end of a rollout file is scanned for a `token_count` event.
 const ROLLOUT_TAIL_BYTES: u64 = 1024 * 1024;
+/// Longest app-server line we keep; replies are a few KB.
+const MAX_LINE_BYTES: u64 = 4 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Pure parsing
@@ -35,12 +37,12 @@ pub fn window_label(mins: Option<u32>) -> String {
         Some(300) => "5-hour".into(),
         Some(10080) => "week".into(),
         Some(m) if m < 60 => format!("{m} min"),
-        Some(m) => format!("{} h", (m + 30) / 60),
+        Some(m) => format!("{} h", m.saturating_add(30) / 60),
     }
 }
 
 fn window_from(v: &Value, pct_key: &str, mins_key: &str, reset_key: &str) -> Option<CodexWindow> {
-    let percent = v.get(pct_key)?.as_f64()? as f32;
+    let percent = v.get(pct_key)?.as_f64().filter(|p| p.is_finite())?.clamp(0.0, 100.0) as f32;
     let window_mins = v.get(mins_key).and_then(Value::as_u64).and_then(|m| u32::try_from(m).ok());
     let resets_at = v.get(reset_key).and_then(Value::as_i64).and_then(|s| DateTime::from_timestamp(s, 0));
     Some(CodexWindow { label: window_label(window_mins), window_mins, percent, resets_at })
@@ -141,6 +143,11 @@ fn handle_line(line: &str, col: &mut Collected) {
         if let Some(ver) = result.get("userAgent").and_then(Value::as_str).and_then(version_from_user_agent) {
             col.server_version = Some(ver);
         }
+        // A limits reply supersedes any notification seen before it; only
+        // later notifications are newer.
+        if result.get("rateLimits").is_some() {
+            col.notified = None;
+        }
         col.results.insert(id, Ok(result.clone()));
     } else if let Some(err) = v.get("error") {
         let msg = err.get("message").and_then(Value::as_str).unwrap_or("error");
@@ -195,19 +202,17 @@ fn sessions_root() -> Option<PathBuf> {
     Some(home.join("sessions"))
 }
 
-fn newest_rollout(dir: &Path, best: &mut Option<(std::time::SystemTime, PathBuf)>) {
+fn collect_rollouts(dir: &Path, out: &mut Vec<(std::time::SystemTime, PathBuf)>) {
     let Ok(entries) = fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
         let path = entry.path();
         let Ok(meta) = entry.metadata() else { continue };
         if meta.is_dir() {
-            newest_rollout(&path, best);
+            collect_rollouts(&path, out);
         } else if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
             if name.starts_with("rollout-") && name.ends_with(".jsonl") {
                 if let Ok(mtime) = meta.modified() {
-                    if best.as_ref().is_none_or(|(t, _)| mtime > *t) {
-                        *best = Some((mtime, path));
-                    }
+                    out.push((mtime, path));
                 }
             }
         }
@@ -229,10 +234,19 @@ fn read_tail(path: &Path) -> Option<String> {
     Some(text)
 }
 
+/// Newest usable `token_count` event across the most recently modified
+/// rollouts: a fresh session may not have logged one yet, and mtime order is
+/// only a hint, so the event timestamps decide.
 fn rollout_snapshot() -> Option<(DateTime<Utc>, Vec<CodexWindow>)> {
-    let mut best = None;
-    newest_rollout(&sessions_root()?, &mut best);
-    last_rollout_snapshot(&read_tail(&best?.1)?)
+    const CANDIDATES: usize = 5;
+    let mut files = Vec::new();
+    collect_rollouts(&sessions_root()?, &mut files);
+    files.sort_by(|a, b| b.0.cmp(&a.0));
+    files
+        .iter()
+        .take(CANDIDATES)
+        .filter_map(|(_, p)| last_rollout_snapshot(&read_tail(p)?))
+        .max_by_key(|(t, _)| *t)
 }
 
 // ---------------------------------------------------------------------------
@@ -286,6 +300,8 @@ fn fall_back(state: &Shared, err: &str) {
 
 struct Server {
     child: Child,
+    /// Dropped after the kill in `Drop`: ends anything the child started.
+    _job: Option<proc::JobGuard>,
     stdin: ChildStdin,
     rx: Receiver<String>,
     pid: u32,
@@ -301,7 +317,7 @@ impl Server {
             .stdin(Stdio::piped())
             .spawn()
             .map_err(|e| format!("cannot start codex: {}", e.kind()))?;
-        proc::adopt(&child);
+        let job = proc::adopt(&child);
         let pid = child.id();
         lock(state).own_pids.insert(pid);
         let (Some(stdin), Some(stdout), Some(stderr)) = (child.stdin.take(), child.stdout.take(), child.stderr.take())
@@ -311,13 +327,16 @@ impl Server {
             lock(state).own_pids.remove(&pid);
             return Err("no stdio".into());
         };
-        let (tx, rx) = mpsc::channel();
+        // Bounded: if we fall behind, the child waits on its pipe instead of
+        // our memory growing.
+        let (tx, rx) = mpsc::sync_channel(256);
         thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
             let mut buf = Vec::new();
             loop {
                 buf.clear();
-                match reader.read_until(b'\n', &mut buf) {
+                // An over-long line arrives in pieces that fail to parse and are skipped.
+                match (&mut reader).take(MAX_LINE_BYTES).read_until(b'\n', &mut buf) {
                     Ok(0) | Err(_) => break,
                     Ok(_) => {
                         if tx.send(String::from_utf8_lossy(&buf).into_owned()).is_err() {
@@ -327,12 +346,11 @@ impl Server {
                 }
             }
         });
-        // Drain stderr so the child never blocks on a full pipe.
+        // Drain and discard stderr so the child never blocks on a full pipe.
         thread::spawn(move || {
-            let mut sink = Vec::new();
-            let _ = BufReader::new(stderr).read_to_end(&mut sink);
+            let _ = std::io::copy(&mut BufReader::new(stderr), &mut std::io::sink());
         });
-        Ok(Self { child, stdin, rx, pid, state: state.clone(), next_id: 2, col: Collected::default() })
+        Ok(Self { child, _job: job, stdin, rx, pid, state: state.clone(), next_id: 2, col: Collected::default() })
     }
 
     fn send(&mut self, msg: Value) -> Result<(), String> {
@@ -345,7 +363,11 @@ impl Server {
     fn wait_for(&mut self, ids: &[u64]) -> Result<(), String> {
         let deadline = Instant::now() + REQUEST_TIMEOUT;
         while !ids.iter().all(|id| self.col.results.contains_key(id)) {
+            // Checked first: a stream of unrelated lines must not outlast the deadline.
             let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err("timeout".into());
+            }
             match self.rx.recv_timeout(left) {
                 Ok(line) => handle_line(&line, &mut self.col),
                 Err(RecvTimeoutError::Timeout) => return Err("timeout".into()),
@@ -386,19 +408,23 @@ impl Server {
         ids.extend(account_id);
         self.wait_for(&ids)?;
 
+        // The account first, even if the limits failed: a logged-out answer
+        // (`account: null`) must replace the old identity.
         let account = account_id.and_then(|id| self.col.take(id)).and_then(Result::ok).map(|r| parse_account(&r));
+        {
+            let mut s = lock(&self.state);
+            s.codex.server_version = self.col.server_version.clone();
+            if let Some(acc) = account {
+                s.codex.account = acc;
+            }
+        }
         let limits = self.col.take(limits_id).unwrap_or_else(|| Err("no reply".into()));
         let windows = match limits {
             Ok(v) => parse_rate_limits(&v).ok_or_else(|| "unexpected response".to_string())?,
             Err(e) => return Err(e),
         };
-        let version = self.col.server_version.clone();
-        write_windows(&self.state, windows);
-        let mut s = lock(&self.state);
-        s.codex.server_version = version;
-        if let Some(acc) = account {
-            s.codex.account = acc;
-        }
+        // A rateLimits notification that arrived after the reply is newer.
+        write_windows(&self.state, self.col.notified.take().unwrap_or(windows));
         Ok(())
     }
 
@@ -408,6 +434,9 @@ impl Server {
         let deadline = Instant::now() + dur;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Ok(());
+            }
             match self.rx.recv_timeout(left) {
                 Ok(line) => {
                     handle_line(&line, &mut self.col);
@@ -592,6 +621,30 @@ mod tests {
         let mut col = Collected::default();
         apply_lines("garbage\n{\"id\":\"x\"}\n[1]\n\n{\"id\":9,\"error\":{\"message\":\"no auth\"}}", &mut col);
         assert_eq!(col.take(9), Some(Err("no auth".into())));
+    }
+
+    #[test]
+    fn notification_order_against_limits_reply() {
+        let note = |p: u32| {
+            format!(r#"{{"method":"account/rateLimits/updated","params":{{"rateLimits":{{"primary":{{"usedPercent":{p},"windowDurationMins":10080}}}}}}}}"#)
+        };
+        let reply = r#"{"id":2,"result":{"rateLimits":{"primary":{"usedPercent":10,"windowDurationMins":10080}}}}"#;
+        // Notification before the reply: superseded by it.
+        let mut col = Collected::default();
+        apply_lines(&format!("{}\n{reply}", note(5)), &mut col);
+        assert!(col.notified.is_none());
+        // Notification after the reply: newer, kept.
+        let mut col = Collected::default();
+        apply_lines(&format!("{reply}\n{}", note(20)), &mut col);
+        assert_eq!(col.notified.unwrap()[0].percent, 20.0);
+    }
+
+    #[test]
+    fn extreme_numbers_are_bounded() {
+        assert_eq!(window_label(Some(u32::MAX)), format!("{} h", u32::MAX / 60));
+        let w = parse_rate_limits(&json!({"rateLimits":{"primary":{"usedPercent":1e100,"windowDurationMins":300}}}))
+            .unwrap();
+        assert_eq!(w[0].percent, 100.0);
     }
 
     #[test]

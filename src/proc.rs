@@ -20,43 +20,51 @@ pub fn command(program: &Path) -> Command {
     cmd
 }
 
-/// Ties a child to our lifetime: every child joins one Job Object with
-/// kill-on-close, so Windows ends it when we exit, however we exit
-/// (worker threads never get to run their `Drop`s).
-pub fn adopt(child: &Child) {
+/// Kills a child's whole process tree when dropped, and when we exit however
+/// we exit (the OS closes the handle). Each child gets its own kill-on-close
+/// Job Object, so a `.cmd` shim's node/native descendants die with it.
+///
+/// Known gap: the child runs briefly before it is assigned, so a descendant
+/// it spawns in that instant is not in the job. The CLIs we start don't.
+pub struct JobGuard(isize);
+
+impl Drop for JobGuard {
+    fn drop(&mut self) {
+        use windows::Win32::Foundation::{CloseHandle, HANDLE};
+        // SAFETY: we own this handle; closing it ends every process in the job.
+        unsafe {
+            let _ = CloseHandle(HANDLE(self.0 as *mut _));
+        }
+    }
+}
+
+/// Puts `child` (and anything it starts later) in a new kill-on-close job.
+/// `None` if Windows refused; the child then only gets a plain `kill`.
+pub fn adopt(child: &Child) -> Option<JobGuard> {
     use std::os::windows::io::AsRawHandle;
-    use std::sync::OnceLock;
-    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
     use windows::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation, SetInformationJobObject,
     };
-
-    // The handle is stored as an integer so the static is Sync; it stays open
-    // until the process exits, which is what closes the job.
-    static JOB: OnceLock<Option<isize>> = OnceLock::new();
-    let job = JOB.get_or_init(|| {
-        // SAFETY: creating and configuring a job we own; the info struct is a
-        // plain out-of-band value of the documented size.
-        unsafe {
-            let job = CreateJobObjectW(None, None).ok()?;
-            let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-            SetInformationJobObject(
-                job,
-                JobObjectExtendedLimitInformation,
-                &info as *const _ as *const _,
-                std::mem::size_of_val(&info) as u32,
-            )
-            .ok()?;
-            Some(job.0 as isize)
+    // SAFETY: creating and configuring a job we own; the info struct is a
+    // plain value of the documented size; the child handle is valid here.
+    unsafe {
+        let job = CreateJobObjectW(None, None).ok()?;
+        let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let configured = SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &info as *const _ as *const _,
+            std::mem::size_of_val(&info) as u32,
+        )
+        .is_ok();
+        if !configured || AssignProcessToJobObject(job, HANDLE(child.as_raw_handle())).is_err() {
+            let _ = CloseHandle(job);
+            return None;
         }
-    });
-    if let Some(job) = job {
-        // SAFETY: both handles are valid for the duration of the call.
-        unsafe {
-            let _ = AssignProcessToJobObject(HANDLE(*job as *mut _), HANDLE(child.as_raw_handle()));
-        }
+        Some(JobGuard(job.0 as isize))
     }
 }
 
@@ -70,7 +78,8 @@ pub struct Captured {
 /// held in `own_pids` while it runs so `sessions` skips it.
 pub fn run_capture(state: &Shared, program: &Path, args: &[&str], timeout: Duration) -> io::Result<Captured> {
     let mut child = command(program).args(args).spawn()?;
-    adopt(&child);
+    // Dropped on return: also ends any descendant still holding our pipes.
+    let _job = adopt(&child);
     let pid = child.id();
     lock(state).own_pids.insert(pid);
     let result = wait_capture(&mut child, timeout);

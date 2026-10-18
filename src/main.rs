@@ -44,7 +44,7 @@ fn main() -> eframe::Result {
         Box::new(move |cc| {
             let ctx = cc.egui_ctx.clone();
             spawn_workers(&state, &config, Arc::new(move || ctx.request_repaint()));
-            Ok(Box::new(App::new(cc, config, state)?))
+            Ok(Box::new(App::new(cc, state)?))
         }),
     )
 }
@@ -77,7 +77,6 @@ fn dump(config: &Config) {
 }
 
 struct App {
-    config: Config,
     state: model::Shared,
     window: Window,
     /// Set by the tray's Exit; any other close request only hides the window.
@@ -88,7 +87,6 @@ struct App {
 impl App {
     fn new(
         cc: &eframe::CreationContext<'_>,
-        config: Config,
         state: model::Shared,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let window = match cc.window_handle()?.as_raw() {
@@ -123,7 +121,7 @@ impl App {
             }
         }));
 
-        Ok(Self { config, state, window, quitting, _tray: tray })
+        Ok(Self { state, window, quitting, _tray: tray })
     }
 }
 
@@ -142,10 +140,6 @@ impl eframe::App for App {
             let json = serde_json::to_string_pretty(&*model::lock(&self.state)).unwrap_or_default();
             egui::ScrollArea::vertical().show(ui, |ui| ui.monospace(json));
         });
-    }
-
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        let _ = self.config.save();
     }
 }
 

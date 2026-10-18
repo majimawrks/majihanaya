@@ -63,7 +63,12 @@ fn parse_reset(text: &str, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
             None => Local.from_local_datetime(&naive).earliest().map(|d| d.with_timezone(&Utc)),
         }
     };
-    let year = now.year();
+    // The stamp's year is the year *in its own zone*: at 00:30 UTC on Jan 1,
+    // New York is still in December.
+    let year = match tz {
+        Some(tz) => now.with_timezone(&tz).year(),
+        None => now.with_timezone(&Local).year(),
+    };
     let this = at_year(year)?;
     if now - this > ChronoDuration::days(30) { at_year(year + 1) } else { Some(this) }
 }
@@ -273,7 +278,16 @@ pub fn refresh(state: &Shared, config: &Config) {
         if due {
             LAST_AUTH_ATTEMPT.store(now.timestamp(), Ordering::Relaxed);
             if let Some(acc) = probe_auth(state, cli) {
-                lock(state).claude.account = Some(acc);
+                let mut s = lock(state);
+                let c = &mut s.claude;
+                let old_org = c.account.as_ref().and_then(|a| a.org_id.clone());
+                // Another account's numbers must not pass as this one's: drop
+                // their freshness so the next failure can't keep showing them.
+                if old_org.is_some() && acc.org_id != old_org {
+                    c.last_success = None;
+                    c.source = ClaudeSource::None;
+                }
+                c.account = Some(acc);
             }
         }
     }
@@ -422,6 +436,9 @@ mod tests {
         let dec30 = utc(2026, 12, 30, 12, 0);
         assert_eq!(parse_reset("Jan 2, 3:40pm (UTC)", dec30), Some(utc(2027, 1, 2, 15, 40)));
         assert_eq!(parse_reset("Dec 31, 1am (UTC)", dec30), Some(utc(2026, 12, 31, 1, 0)));
+        // 00:30 UTC on Jan 1 is still Dec 31 in New York: the reset is 90 minutes away.
+        let jan1 = utc(2027, 1, 1, 0, 30);
+        assert_eq!(parse_reset("Dec 31, 9pm (America/New_York)", jan1), Some(utc(2027, 1, 1, 2, 0)));
         // slightly in the past stays in the current year
         assert_eq!(parse_reset("Dec 29, 12pm (UTC)", dec30), Some(utc(2026, 12, 29, 12, 0)));
         assert_eq!(parse_reset("Oct 17, 12am (UTC)", now()), Some(utc(2026, 10, 17, 0, 0)));
