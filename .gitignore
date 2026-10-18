@@ -1,0 +1,29 @@
+# build output (normally outside the repo via CARGO_TARGET_DIR)
+/target/
+
+# private folders
+_*/
+
+# AI tooling
+CLAUDE.md
+CLAUDE.local.md
+.claude/
+AGENTS.md
+GEMINI.md
+.codex/
+.cursor/
+.cursorrules
+.windsurf/
+.aider*
+.github/copilot-instructions.md
+.superpowers/
+
+# editors / OS
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+
+# machine-local cargo settings (target-dir)
+/.cargo/config.toml
