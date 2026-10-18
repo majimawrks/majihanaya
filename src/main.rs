@@ -8,7 +8,6 @@ use config::Config;
 use eframe::egui;
 use platform::Window;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tray_icon::TrayIconEvent;
@@ -108,6 +107,5 @@ fn open_config_file() {
     if !path.exists() {
         let _ = Config::default().save();
     }
-    // explorer opens the file with the user's default .json handler.
-    let _ = Command::new("explorer").arg(path).spawn();
+    platform::open_file(&path);
 }

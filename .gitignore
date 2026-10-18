@@ -27,3 +27,6 @@ desktop.ini
 
 # machine-local cargo settings (target-dir)
 /.cargo/config.toml
+
+# icongen previews
+/assets/preview-*.png

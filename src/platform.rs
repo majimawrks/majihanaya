@@ -6,7 +6,18 @@ use windows::Win32::UI::WindowsAndMessaging::{
     FindWindowW, IsWindowVisible, PostMessageW, SW_HIDE, SW_RESTORE, SW_SHOW, SetForegroundWindow,
     ShowWindow, WM_CLOSE,
 };
+use windows::Win32::UI::Shell::ShellExecuteW;
+use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 use windows::core::{HSTRING, w};
+use std::path::Path;
+
+/// Opens a file with the user's default handler for its type.
+pub fn open_file(path: &Path) {
+    // SAFETY: Win32 call with owned, NUL-terminated strings that outlive it.
+    unsafe {
+        ShellExecuteW(None, w!("open"), &HSTRING::from(path.as_os_str()), None, None, SW_SHOWNORMAL);
+    }
+}
 
 /// Distinct from the bare project name so `FindWindowW` never matches an
 /// Explorer window open on a folder called "majihanaya".

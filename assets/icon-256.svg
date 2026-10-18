@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+<defs>
+<linearGradient id="mjBody" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3A3D36"/><stop offset="1" stop-color="#1B1C19"/></linearGradient>
+<radialGradient id="mjScreen" cx="0.5" cy="0.45" r="0.7"><stop offset="0" stop-color="#0B2414"/><stop offset="1" stop-color="#030805"/></radialGradient>
+<pattern id="mjScan" width="4" height="4" patternUnits="userSpaceOnUse"><rect width="4" height="1.5" fill="#000000" opacity="0.35"/></pattern>
+</defs>
+<rect x="110" y="198" width="36" height="16" fill="#22241F"/>
+<rect x="70" y="210" width="116" height="22" rx="11" fill="url(#mjBody)" stroke="#4A4D45" stroke-width="2"/>
+<rect x="16" y="24" width="224" height="176" rx="30" fill="url(#mjBody)" stroke="#4A4D45" stroke-width="2"/>
+<path d="M44 27 H212" stroke="#5A5E54" stroke-width="2" stroke-linecap="round" opacity="0.7"/>
+<rect x="34" y="40" width="188" height="144" rx="20" fill="#0C0D0B"/>
+<rect x="44" y="50" width="168" height="124" rx="16" fill="url(#mjScreen)"/>
+<g stroke="#2F8F57" stroke-width="4" stroke-linecap="round" fill="none">
+<path d="M58 78 V64 H72"/><path d="M184 64 H198 V78"/><path d="M58 146 V160 H72"/><path d="M184 160 H198 V146"/>
+</g>
+<path d="M128 138 C128 148 127 156 125 164" stroke="#2F8F57" stroke-width="5" stroke-linecap="round" fill="none"/>
+<path d="M127 152 C134 144 146 143 153 147 C147 156 135 158 127 152 Z" fill="#2F8F57"/>
+<g fill="none" stroke="#4ADE80" stroke-width="12" opacity="0.16">
+<circle cx="128" cy="86" r="14"/><circle cx="148.9" cy="101.2" r="14"/><circle cx="140.9" cy="125.8" r="14"/><circle cx="115.1" cy="125.8" r="14"/><circle cx="107.1" cy="101.2" r="14"/>
+</g>
+<g fill="#4ADE80">
+<circle cx="128" cy="86" r="14"/><circle cx="148.9" cy="101.2" r="14"/><circle cx="140.9" cy="125.8" r="14"/><circle cx="115.1" cy="125.8" r="14"/><circle cx="107.1" cy="101.2" r="14"/>
+</g>
+<circle cx="128" cy="108" r="10" fill="#06120A" stroke="#4ADE80" stroke-width="4"/>
+<circle cx="174" cy="76" r="11" fill="#F25555" opacity="0.22"/>
+<circle cx="174" cy="76" r="6" fill="#F25555"/>
+<rect x="44" y="50" width="168" height="124" rx="16" fill="url(#mjScan)"/>
+</svg>

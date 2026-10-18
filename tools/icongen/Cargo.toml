@@ -1,0 +1,12 @@
+[package]
+name = "icongen"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Builds assets/majihanaya.ico from the design's icon sources"
+
+# Standalone: not part of the app's build.
+[workspace]
+
+[dependencies]
+resvg = "=0.48.1"
