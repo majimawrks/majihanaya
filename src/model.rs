@@ -30,6 +30,8 @@ pub struct AppState {
     pub codex: CodexState,
     pub sessions: SessionsState,
     pub claude_status: ServiceStatus,
+    /// The Codex-relevant part of status.openai.com.
+    pub codex_status: ServiceStatus,
     pub version: VersionState,
     /// PIDs of our own probe children, so they never count as sessions.
     #[serde(skip)]

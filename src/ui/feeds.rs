@@ -313,14 +313,32 @@ pub fn wall(state: &AppState, config: &Config, now: DateTime<Utc>, tz: FixedOffs
     }
     let list = &state.sessions.list;
     let status = config.show_status.then(|| {
-        let s = &state.claude_status;
-        let text = match s.level {
-            StatusLevel::Green => "STATUS OK",
-            StatusLevel::Yellow => "DEGRADED",
-            StatusLevel::Red => "OUTAGE",
-            StatusLevel::Unknown => "STATUS --",
+        // The worst of the services shown; named when only one is affected.
+        let rank = |l: StatusLevel| match l {
+            StatusLevel::Unknown => 0,
+            StatusLevel::Green => 1,
+            StatusLevel::Yellow => 2,
+            StatusLevel::Red => 3,
         };
-        (s.level, text.to_string())
+        let shown: Vec<(&str, StatusLevel)> = [
+            ("CLAUDE", sections.iter().any(|s| s.name == "CLAUDE"), state.claude_status.level),
+            ("CODEX", sections.iter().any(|s| s.name == "CODEX"), state.codex_status.level),
+        ]
+        .into_iter()
+        .filter(|(_, on, _)| *on)
+        .map(|(n, _, l)| (n, l))
+        .collect();
+        let worst = shown.iter().map(|(_, l)| *l).max_by_key(|l| rank(*l)).unwrap_or(StatusLevel::Unknown);
+        let hit: Vec<&str> = shown.iter().filter(|(_, l)| rank(*l) >= 2).map(|(n, _)| *n).collect();
+        let word = match worst {
+            StatusLevel::Green => "STATUS OK".to_string(),
+            StatusLevel::Unknown => "STATUS --".to_string(),
+            StatusLevel::Yellow | StatusLevel::Red => {
+                let w = if worst == StatusLevel::Red { "OUTAGE" } else { "DEGRADED" };
+                if hit.len() == 1 && shown.len() > 1 { format!("{w} · {}", hit[0]) } else { w.to_string() }
+            }
+        };
+        (worst, word)
     });
     let footer = Footer {
         status,

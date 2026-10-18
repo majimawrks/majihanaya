@@ -528,25 +528,29 @@ pub fn refresh(state: &Shared, _config: &Config) {
     }
 }
 
+/// The poll interval, read live so Settings and config edits apply at once.
+fn interval() -> Duration {
+    Duration::from_secs(crate::config::current().codex_interval_seconds.max(5))
+}
+
 /// Worker: one long-lived app-server child polled every `codex_interval_seconds`.
-pub fn spawn(state: Shared, config: Config, notify: Notify) {
+pub fn spawn(state: Shared, notify: Notify) {
     let _ = thread::Builder::new().name("codex".into()).spawn(move || {
-        let interval = Duration::from_secs(config.codex_interval_seconds.max(5));
         let mut failures: u32 = 0;
         loop {
-            let ran_ok = catch_unwind(AssertUnwindSafe(|| run_session(&state, interval, &notify))).unwrap_or(false);
+            let ran_ok = catch_unwind(AssertUnwindSafe(|| run_session(&state, &notify))).unwrap_or(false);
             if ran_ok {
                 failures = 0;
             }
             failures = failures.saturating_add(1);
-            let backoff = interval.saturating_mul(1u32 << (failures - 1).min(10)).min(MAX_BACKOFF);
+            let backoff = interval().saturating_mul(1u32 << (failures - 1).min(10)).min(MAX_BACKOFF);
             REFRESH.sleep(backoff);
         }
     });
 }
 
 /// Runs one child until it fails. Returns whether at least one poll succeeded.
-fn run_session(state: &Shared, interval: Duration, notify: &Notify) -> bool {
+fn run_session(state: &Shared, notify: &Notify) -> bool {
     let mut ok = false;
     let mut last_account: Option<Instant> = None;
     let result: Result<(), String> = (|| {
@@ -560,7 +564,7 @@ fn run_session(state: &Shared, interval: Duration, notify: &Notify) -> bool {
             }
             ok = true;
             notify();
-            server.idle(interval, notify)?;
+            server.idle(interval(), notify)?;
         }
     })();
     if let Err(e) = result {

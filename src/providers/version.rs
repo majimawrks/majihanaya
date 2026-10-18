@@ -73,15 +73,16 @@ pub fn refresh(state: &Shared, _config: &Config) {
     }
 }
 
-pub fn spawn(state: Shared, config: Config, notify: Notify) {
-    let interval = Duration::from_secs(config.version_interval_seconds.max(1));
+pub fn spawn(state: Shared, notify: Notify) {
     thread::spawn(move || {
         loop {
+            // Read every cycle: Settings and config-file edits apply live.
+            let config = crate::config::current();
             let _ = catch_unwind(AssertUnwindSafe(|| {
                 refresh(&state, &config);
                 notify();
             }));
-            crate::model::REFRESH.sleep(interval);
+            crate::model::REFRESH.sleep(Duration::from_secs(config.version_interval_seconds.max(1)));
         }
     });
 }

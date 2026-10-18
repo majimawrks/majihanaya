@@ -132,7 +132,7 @@ fn fit(p: &Painter, s: &str, font: &FontId, max_w: f32) -> String {
 
 fn status_screen(p: &Painter, r: Rect, state: &AppState, tz: FixedOffset) {
     header(p, r, "CAM 07 · STATUS", &clock_of(state.claude_status.last_success, tz));
-    let rows = [("CLAUDE", Some(&state.claude_status)), ("CODEX", None)];
+    let rows = [("CLAUDE", Some(&state.claude_status)), ("CODEX", Some(&state.codex_status))];
     for (i, (name, status)) in rows.into_iter().enumerate() {
         let y = r.top() + 16.0 + 3.0 + i as f32 * 19.0 + 8.0;
         let (color, label) = match status {
@@ -141,7 +141,9 @@ fn status_screen(p: &Painter, r: Rect, state: &AppState, tz: FixedOffset) {
         };
         p.circle_filled(pos2(r.left() + 3.5, y), 3.5, color);
         text(p, pos2(r.left() + 15.0, y), Align2::LEFT_CENTER, name, vt(18.0), color, 0.0);
-        text(p, pos2(r.left() + 15.0 + 56.0 + 8.0, y), Align2::LEFT_CENTER, &label, vt(18.0), color, 0.0);
+        let x = r.left() + 15.0 + 56.0 + 8.0;
+        let label = fit(p, &label, &vt(18.0), r.right() - x);
+        text(p, pos2(x, y), Align2::LEFT_CENTER, &label, vt(18.0), color, 0.0);
     }
 }
 

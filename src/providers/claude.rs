@@ -354,9 +354,11 @@ pub fn refresh(state: &Shared, config: &Config) {
 
 /// Worker thread: refresh, notify, sleep `usage_interval_seconds` from the end
 /// of each try (so two probes never overlap). Never panics.
-pub fn spawn(state: Shared, config: Config, notify: Notify) {
+pub fn spawn(state: Shared, notify: Notify) {
     let _ = thread::Builder::new().name("claude-usage".into()).spawn(move || {
         loop {
+            // Read every cycle: Settings and config-file edits apply live.
+            let config = crate::config::current();
             let _ = catch_unwind(AssertUnwindSafe(|| refresh(&state, &config)));
             let _ = catch_unwind(AssertUnwindSafe(|| notify()));
             crate::model::REFRESH.sleep(Duration::from_secs(config.usage_interval_seconds.max(5)));

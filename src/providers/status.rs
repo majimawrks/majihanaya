@@ -9,6 +9,69 @@ use std::thread;
 use std::time::Duration;
 
 pub const CLAUDE_SUMMARY_URL: &str = "https://status.claude.com/api/v2/summary.json";
+pub const OPENAI_SUMMARY_URL: &str = "https://status.openai.com/api/v2/summary.json";
+
+/// OpenAI's page covers ChatGPT, the API, Sora…: only these components
+/// (and incidents touching them or naming Codex) count for Codex.
+pub fn codex_relevant(component: &str) -> bool {
+    let c = component.to_lowercase();
+    c.contains("codex") || c == "responses" || c == "login"
+}
+
+/// Like `parse_summary`, but judged only on components where `relevant`
+/// holds; the page-wide indicator is ignored.
+pub fn parse_summary_for(json: &str, relevant: fn(&str) -> bool) -> Option<(StatusLevel, String)> {
+    let v: Value = serde_json::from_str(json.trim_start_matches('\u{feff}')).ok()?;
+    v.get("status")?.get("indicator")?.as_str()?;
+    let empty = Vec::new();
+    let name = |x: &Value| x.get("name").and_then(Value::as_str).unwrap_or("").to_string();
+    let statuses: Vec<String> = v
+        .get("components")
+        .and_then(Value::as_array)
+        .unwrap_or(&empty)
+        .iter()
+        .filter(|c| c.get("group").and_then(Value::as_bool) != Some(true) && relevant(&name(c)))
+        .map(|c| c.get("status").and_then(Value::as_str).unwrap_or("operational").to_string())
+        .collect();
+    let level = if statuses.iter().any(|s| s == "major_outage") {
+        StatusLevel::Red
+    } else if statuses.iter().any(|s| s != "operational") {
+        StatusLevel::Yellow
+    } else {
+        StatusLevel::Green
+    };
+    let names: Vec<String> = v
+        .get("incidents")
+        .and_then(Value::as_array)
+        .unwrap_or(&empty)
+        .iter()
+        .filter(|i| !matches!(i.get("status").and_then(Value::as_str), Some("resolved" | "postmortem")))
+        .filter(|i| {
+            name(i).to_lowercase().contains("codex")
+                || i.get("components").and_then(Value::as_array).is_some_and(|cs| cs.iter().any(|c| relevant(&name(c))))
+        })
+        .map(name)
+        .collect();
+    // A relevant incident while every component still reads operational is degraded.
+    let level = if level == StatusLevel::Green && !names.is_empty() { StatusLevel::Yellow } else { level };
+    let text = match level {
+        StatusLevel::Green => String::new(),
+        _ if !names.is_empty() => names.join("; "),
+        _ if statuses.iter().any(|s| s == "under_maintenance") => "maintenance".into(),
+        _ => "some issues".into(),
+    };
+    Some((level, text))
+}
+
+fn fetch_body(url: &str) -> Result<String, String> {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(10)))
+        .user_agent(concat!("majihanaya/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .into();
+    let mut resp = agent.get(url).call().map_err(|e| e.to_string())?;
+    resp.body_mut().read_to_string().map_err(|e| e.to_string())
+}
 
 /// Level and text of a Statuspage summary; `None` when the JSON is not one.
 pub fn parse_summary(json: &str) -> Option<(StatusLevel, String)> {
@@ -52,38 +115,35 @@ pub fn parse_summary(json: &str) -> Option<(StatusLevel, String)> {
 }
 
 pub fn fetch_summary(url: &str) -> Result<(StatusLevel, String), String> {
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(10)))
-        .user_agent(concat!("majihanaya/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .into();
-    let mut resp = agent.get(url).call().map_err(|e| e.to_string())?;
-    let body = resp.body_mut().read_to_string().map_err(|e| e.to_string())?;
-    parse_summary(&body).ok_or_else(|| "unexpected status response".to_string())
+    parse_summary(&fetch_body(url)?).ok_or_else(|| "unexpected status response".to_string())
 }
 
-pub fn refresh(state: &Shared, _config: &Config) {
-    let result = fetch_summary(CLAUDE_SUMMARY_URL);
-    {
-        let mut s = lock(state);
-        match result {
-            Ok((level, text)) => {
-                s.claude_status = ServiceStatus { level, text, last_success: Some(Utc::now()), error: None };
-            }
-            Err(e) => s.claude_status.error = Some(e),
-        }
+fn apply(slot: &mut ServiceStatus, result: Result<(StatusLevel, String), String>) {
+    match result {
+        Ok((level, text)) => *slot = ServiceStatus { level, text, last_success: Some(Utc::now()), error: None },
+        Err(e) => slot.error = Some(e),
     }
 }
 
-pub fn spawn(state: Shared, config: Config, notify: Notify) {
-    let interval = Duration::from_secs(config.status_interval_seconds.max(1));
+pub fn refresh(state: &Shared, _config: &Config) {
+    let claude = fetch_summary(CLAUDE_SUMMARY_URL);
+    let codex = fetch_body(OPENAI_SUMMARY_URL)
+        .and_then(|b| parse_summary_for(&b, codex_relevant).ok_or_else(|| "unexpected status response".to_string()));
+    let mut s = lock(state);
+    apply(&mut s.claude_status, claude);
+    apply(&mut s.codex_status, codex);
+}
+
+pub fn spawn(state: Shared, notify: Notify) {
     thread::spawn(move || {
         loop {
+            // Read every cycle: Settings and config-file edits apply live.
+            let config = crate::config::current();
             let _ = catch_unwind(AssertUnwindSafe(|| {
                 refresh(&state, &config);
                 notify();
             }));
-            crate::model::REFRESH.sleep(interval);
+            crate::model::REFRESH.sleep(Duration::from_secs(config.status_interval_seconds.max(1)));
         }
     });
 }
@@ -114,6 +174,25 @@ mod tests {
         assert_eq!(parse_summary(json), Some((StatusLevel::Red, "A; B".to_string())));
         let crit = r#"{"status":{"indicator":"critical"},"components":[],"incidents":[]}"#;
         assert_eq!(parse_summary(crit), Some((StatusLevel::Red, "some issues".to_string())));
+    }
+
+    #[test]
+    fn codex_scope_ignores_unrelated_openai_components() {
+        let page = |sora: &str, codex: &str, incident: &str| {
+            format!(
+                r#"{{"status":{{"indicator":"major"}},"components":[{{"name":"Sora","status":"{sora}"}},{{"name":"Codex in ChatGPT Desktop","status":"{codex}"}},{{"name":"Responses","status":"operational"}}],"incidents":[{incident}]}}"#
+            )
+        };
+        // Sora down, Codex fine: green despite the page-wide "major".
+        assert_eq!(parse_summary_for(&page("major_outage", "operational", ""), codex_relevant), Some((StatusLevel::Green, String::new())));
+        assert_eq!(parse_summary_for(&page("operational", "major_outage", ""), codex_relevant).unwrap().0, StatusLevel::Red);
+        let inc = r#"{"name":"Elevated Codex errors","status":"investigating","components":[]}"#;
+        assert_eq!(
+            parse_summary_for(&page("operational", "operational", inc), codex_relevant),
+            Some((StatusLevel::Yellow, "Elevated Codex errors".into()))
+        );
+        let other = r#"{"name":"Sora slow","status":"investigating","components":[{"name":"Sora"}]}"#;
+        assert_eq!(parse_summary_for(&page("degraded_performance", "operational", other), codex_relevant).unwrap().0, StatusLevel::Green);
     }
 
     #[test]

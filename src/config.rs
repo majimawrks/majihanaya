@@ -83,6 +83,17 @@ impl Default for Config {
     }
 }
 
+static CURRENT: std::sync::RwLock<Option<Config>> = std::sync::RwLock::new(None);
+
+/// The live config: what workers read each cycle. `publish` replaces it.
+pub fn current() -> Config {
+    CURRENT.read().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or_default()
+}
+
+pub fn publish(config: &Config) {
+    *CURRENT.write().unwrap_or_else(|e| e.into_inner()) = Some(config.clone());
+}
+
 pub fn path() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("majihanaya").join("config.json"))
 }

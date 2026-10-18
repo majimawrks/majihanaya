@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod config;
+mod logfile;
 mod model;
 mod platform;
 mod proc;
@@ -24,12 +25,14 @@ fn main() -> eframe::Result {
         return Ok(());
     }
 
+    logfile::install_panic_hook();
     let Some(_instance) = platform::single_instance() else {
         platform::activate_existing();
         return Ok(());
     };
 
     let config = Config::load();
+    logfile::ERRORS.line(concat!("majihanaya ", env!("CARGO_PKG_VERSION"), " started"));
     let state: model::Shared = Default::default();
     // The design's compact window; resized to its content after the first frame.
     let size = [ui::COMPACT_W, 440.0];
@@ -68,11 +71,12 @@ fn main() -> eframe::Result {
 
 fn spawn_workers(state: &model::Shared, config: &Config, notify: model::Notify) {
     use providers::*;
-    claude::spawn(state.clone(), config.clone(), notify.clone());
-    codex::spawn(state.clone(), config.clone(), notify.clone());
-    sessions::spawn(state.clone(), config.clone(), notify.clone());
-    status::spawn(state.clone(), config.clone(), notify.clone());
-    version::spawn(state.clone(), config.clone(), notify);
+    config::publish(config);
+    claude::spawn(state.clone(), notify.clone());
+    codex::spawn(state.clone(), notify.clone());
+    sessions::spawn(state.clone(), notify.clone());
+    status::spawn(state.clone(), notify.clone());
+    version::spawn(state.clone(), notify);
 }
 
 /// `--dump`: one refresh of every source, the state as JSON on stdout, exit.
@@ -103,6 +107,9 @@ struct App {
     /// Menu actions that need `App` (config, tray); drained in `logic`.
     actions: mpsc::Receiver<tray::Action>,
     ui: ui::WindowUi,
+    errors: logfile::ErrorWatch,
+    config_mtime: Option<std::time::SystemTime>,
+    config_checked: std::time::Instant,
     /// Content size last sent to the viewport.
     size: egui::Vec2,
     /// Outer position we last placed or saw, and a drag-move awaiting save.
@@ -166,6 +173,9 @@ impl App {
             tray,
             actions,
             ui,
+            errors: Default::default(),
+            config_mtime: config_mtime(),
+            config_checked: std::time::Instant::now(),
             size: egui::vec2(ui::COMPACT_W, 440.0),
             pos: None,
             dragging: None,
@@ -207,13 +217,41 @@ impl App {
             self.pos = Some(outer.min);
             self.config.left = Some(outer.min.x);
             self.config.top = Some(outer.min.y);
-            let _ = self.config.save();
+            self.save_config();
         } else {
             ctx.request_repaint_after(SETTLE);
         }
     }
 
-    fn apply_settings(&mut self, ctx: &egui::Context, cfg: Config, autostart: bool) {
+    /// Saves, publishes to the workers, and remembers the file's mtime so
+    /// our own write isn't mistaken for an outside edit.
+    fn save_config(&mut self) {
+        let _ = self.config.save();
+        config::publish(&self.config);
+        self.config_mtime = config_mtime();
+    }
+
+    /// Picks up edits made to config.json while running (checked at most
+    /// once a second, on the frames the app runs anyway).
+    fn reload_if_edited(&mut self, ctx: &egui::Context) {
+        if self.config_checked.elapsed() < std::time::Duration::from_secs(1) {
+            return;
+        }
+        self.config_checked = std::time::Instant::now();
+        let mtime = config_mtime();
+        if mtime.is_none() || mtime == self.config_mtime {
+            return;
+        }
+        self.config_mtime = mtime;
+        let loaded = Config::load();
+        logfile::ERRORS.line("config.json changed on disk: reloaded");
+        let autostart = platform::autostart_enabled();
+        self.apply_settings(ctx, loaded, autostart, false);
+    }
+
+    /// `save`: false when the config came from the file itself (an outside
+    /// edit), so it isn't rewritten under the editor that made it.
+    fn apply_settings(&mut self, ctx: &egui::Context, cfg: Config, autostart: bool, save: bool) {
         if cfg.topmost != self.config.topmost {
             let level = if cfg.topmost { egui::WindowLevel::AlwaysOnTop } else { egui::WindowLevel::Normal };
             ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(level));
@@ -224,11 +262,14 @@ impl App {
         // Keep the saved position: the panel doesn't edit it.
         let (left, top) = (self.config.left, self.config.top);
         self.config = Config { left, top, ..cfg.sanitized() };
-        let _ = self.config.save();
+        if save {
+            self.save_config();
+        } else {
+            config::publish(&self.config);
+        }
         if autostart != platform::autostart_enabled() && platform::set_autostart(autostart).is_ok() {
             self.tray.set_autostart_checked(autostart);
         }
-        // Workers keep their start-up intervals until restart (hot reload: M4).
     }
 
     fn handle(&mut self, ctx: &egui::Context, action: tray::Action) {
@@ -238,7 +279,7 @@ impl App {
                 // Rounded so repeated steps don't drift (1.0999…).
                 self.config.scale = ((self.config.scale + step) * 10.0).round().clamp(7.5, 20.0) / 10.0;
                 ctx.set_zoom_factor(self.config.scale);
-                let _ = self.config.save();
+                self.save_config();
             }
             tray::Action::Settings => {
                 self.ui.open_settings(&self.config);
@@ -264,14 +305,25 @@ impl eframe::App for App {
         while let Ok(action) = self.actions.try_recv() {
             self.handle(ctx, action);
         }
+        self.reload_if_edited(ctx);
 
         let now = chrono::Utc::now();
-        let (view, tip) = {
+        let (view, tip, errors) = {
             let s = model::lock(&self.state);
+            let errors = [
+                ("claude", s.claude.error.clone()),
+                ("codex", s.codex.error.clone()),
+                ("claude status", s.claude_status.error.clone()),
+                ("codex status", s.codex_status.error.clone()),
+            ];
             let view = trayview::view(&s, &self.config, now);
             let tip = trayview::tooltip(&view, self.config.tray_reset_clock, now);
-            (view, tip)
+            (view, tip, errors)
         };
+        // Log file I/O happens after the state lock is released.
+        for (source, e) in &errors {
+            self.errors.check(source, e.as_deref());
+        }
         self.tray.update(&view, tip);
         // Countdowns and staleness move with the clock: look again at the next
         // minute boundary (one wakeup a minute, hidden or not).
@@ -300,13 +352,17 @@ impl eframe::App for App {
                     ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
                 }
                 ui::Action::OpenConfig => open_config_file(),
-                ui::Action::Apply(cfg, autostart) => self.apply_settings(&ctx, *cfg, autostart),
+                ui::Action::Apply(cfg, autostart) => self.apply_settings(&ctx, *cfg, autostart, true),
             }
         }
         self.fit(&ctx, size.ceil());
         self.track_position(&ctx);
     }
 
+}
+
+fn config_mtime() -> Option<std::time::SystemTime> {
+    config::path().and_then(|p| std::fs::metadata(p).ok()).and_then(|m| m.modified().ok())
 }
 
 fn open_config_file() {
