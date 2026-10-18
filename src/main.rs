@@ -153,7 +153,7 @@ impl App {
             None => {}
         }));
 
-        let ui = ui::WindowUi::new(&cc.egui_ctx);
+        let ui = ui::WindowUi::new(&cc.egui_ctx, &config);
         Ok(Self {
             config,
             state,

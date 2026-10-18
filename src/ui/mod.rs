@@ -57,16 +57,25 @@ pub struct WindowUi {
 }
 
 impl WindowUi {
-    pub fn new(ctx: &egui::Context) -> Self {
+    pub fn new(ctx: &egui::Context, config: &Config) -> Self {
         theme::install(ctx);
-        Self {
+        let mut ui = Self {
             tex: textures::Textures::new(ctx),
             view: View::Compact,
             sweeps: HashMap::new(),
             modes: HashMap::new(),
             settings: None,
             blink_epoch: Instant::now(),
+        };
+        // Debug builds only: start in another view, for screenshots.
+        if cfg!(debug_assertions) {
+            match std::env::var("MAJIHANAYA_VIEW").as_deref() {
+                Ok("details") => ui.view = View::Details,
+                Ok("settings") => ui.open_settings(config),
+                _ => {}
+            }
         }
+        ui
     }
 
     pub fn open_settings(&mut self, config: &Config) {
