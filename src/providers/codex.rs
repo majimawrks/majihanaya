@@ -292,6 +292,8 @@ fn merge_main(current: &[CodexWindow], main: Vec<CodexWindow>) -> Vec<CodexWindo
 }
 
 fn write_windows(state: &Shared, windows: Vec<CodexWindow>) {
+    // File I/O stays outside the state lock.
+    super::codex_log::record(&windows);
     let mut s = lock(state);
     s.codex.presence = Presence::Found;
     s.codex.windows = windows;
