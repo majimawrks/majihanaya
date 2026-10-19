@@ -7,7 +7,7 @@ use super::theme::{self, Phosphor, chrome, mono, vt};
 use crate::config::Config;
 use crate::model::{AppState, ServiceStatus, Session, SessionStatus, StatusLevel, UsageStats};
 use chrono::{DateTime, FixedOffset, Utc};
-use eframe::egui::{self, Align2, Color32, FontId, Painter, Rect, pos2, vec2};
+use egui::{Align2, Color32, FontId, Painter, Rect, pos2, vec2};
 
 const GAP: f32 = 8.0;
 /// Bezel padding on both sides of a screen.

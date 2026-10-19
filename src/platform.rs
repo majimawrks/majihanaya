@@ -1,10 +1,10 @@
 //! The few Win32 calls the app needs. Kept here so the data code stays portable.
 
-use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND, LPARAM, WPARAM};
+use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND};
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowW, IsWindowVisible, PostMessageW, SW_HIDE, SW_RESTORE, SW_SHOW, SetForegroundWindow,
-    ShowWindow, WM_CLOSE,
+    FindWindowW, IsWindowVisible, SW_HIDE, SW_RESTORE, SW_SHOW, SetForegroundWindow,
+    ShowWindow,
 };
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
@@ -68,6 +68,10 @@ impl Window {
         Self(hwnd)
     }
 
+    pub fn raw(self) -> isize {
+        self.0
+    }
+
     fn hwnd(self) -> HWND {
         HWND(self.0 as *mut _)
     }
@@ -85,6 +89,15 @@ impl Window {
         }
     }
 
+    /// Shows without taking focus (start-up, settings re-open from code).
+    pub fn show_no_activate(self) {
+        use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNOACTIVATE;
+        // SAFETY: our own window handle.
+        unsafe {
+            let _ = ShowWindow(self.hwnd(), SW_SHOWNOACTIVATE);
+        }
+    }
+
     pub fn hide(self) {
         // SAFETY: as above.
         unsafe {
@@ -94,51 +107,6 @@ impl Window {
 
     pub fn toggle(self) {
         if self.is_visible() { self.hide() } else { self.show() }
-    }
-
-    /// Moves the window so its *visible* frame (title bar included, invisible
-    /// resize borders excluded) sits in the tray corner of the work area.
-    pub fn snap_to_tray_corner(self) {
-        use windows::Win32::Foundation::RECT;
-        use windows::Win32::Graphics::Dwm::{DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
-        use windows::Win32::UI::WindowsAndMessaging::{GetWindowRect, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos};
-        let Some(((l, t, r, b), corner, scale)) = tray_corner() else { return };
-        let gap = (12.0 * scale).round() as i32;
-        // SAFETY: queries and moves our own window; RECTs are plain out-params.
-        unsafe {
-            let (mut outer, mut frame) = (RECT::default(), RECT::default());
-            if GetWindowRect(self.hwnd(), &mut outer).is_err()
-                || DwmGetWindowAttribute(
-                    self.hwnd(),
-                    DWMWA_EXTENDED_FRAME_BOUNDS,
-                    &mut frame as *mut _ as *mut _,
-                    std::mem::size_of::<RECT>() as u32,
-                )
-                .is_err()
-            {
-                frame = outer;
-            }
-            let (fw, fh) = (frame.right - frame.left, frame.bottom - frame.top);
-            let fx = match corner {
-                Corner::BottomLeft => l + gap,
-                _ => r - gap - fw,
-            };
-            let fy = match corner {
-                Corner::TopRight => t + gap,
-                _ => b - gap - fh,
-            };
-            // SetWindowPos takes the outer rect: shift by the invisible border.
-            let (x, y) = (fx - (frame.left - outer.left), fy - (frame.top - outer.top));
-            let _ = SetWindowPos(self.hwnd(), None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-        }
-    }
-
-    /// Asks the event loop to close, even while the window is hidden.
-    pub fn post_close(self) {
-        // SAFETY: as above.
-        unsafe {
-            let _ = PostMessageW(Some(self.hwnd()), WM_CLOSE, WPARAM(0), LPARAM(0));
-        }
     }
 }
 
@@ -227,19 +195,3 @@ pub fn tray_corner() -> Option<((i32, i32, i32, i32), Corner, f32)> {
     }
 }
 
-/// Top-left (logical points, as eframe wants) for a window of `size` logical
-/// points sitting in the tray corner with a small gap.
-pub fn default_position(size: [f32; 2]) -> Option<[f32; 2]> {
-    const GAP: f32 = 12.0;
-    let ((l, t, r, b), corner, scale) = tray_corner()?;
-    let (l, t, r, b) = (l as f32 / scale, t as f32 / scale, r as f32 / scale, b as f32 / scale);
-    let x = match corner {
-        Corner::BottomLeft => l + GAP,
-        _ => r - GAP - size[0],
-    };
-    let y = match corner {
-        Corner::TopRight => t + GAP,
-        _ => b - GAP - size[1],
-    };
-    Some([x, y])
-}

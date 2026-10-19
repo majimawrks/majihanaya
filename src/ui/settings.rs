@@ -6,7 +6,7 @@
 use super::monitor::text;
 use super::theme::{chrome, hex, mono, vt};
 use crate::config::{Config, TrayNumber};
-use eframe::egui::{
+use egui::{
     self, Align2, Color32, EventFilter, Key, Margin, Modifiers, Painter, Pos2, Rect, Response, Sense, Stroke,
     StrokeKind, Ui, pos2, vec2,
 };

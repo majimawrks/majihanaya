@@ -1,7 +1,7 @@
 //! Static textures from the Spec board, each built once and reused: CRT
 //! scanlines, the screen vignette and the FEED LOST static.
 
-use eframe::egui::{self, Color32, ColorImage, TextureHandle, TextureOptions, TextureWrapMode};
+use egui::{self, Color32, ColorImage, TextureHandle, TextureOptions, TextureWrapMode};
 
 pub struct Textures {
     /// 1×3: row 0 black at α 0.22, rows 1–2 clear. Tiled, UV = rect px / 3.

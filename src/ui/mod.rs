@@ -4,7 +4,7 @@
 //! Motion budget (Spec board): REC/WAIT blink at 1 Hz only while a session
 //! is busy/waiting, a 400 ms sweep when a feed's source replies, a 3-frame
 //! static burst when a feed changes state, countdowns at the minute. Nothing
-//! is scheduled while the window is hidden (eframe runs no ui pass then).
+//! is scheduled while the window is hidden (the shell runs no ui pass then).
 
 pub mod details;
 pub mod feeds;
@@ -16,7 +16,7 @@ pub mod theme;
 use crate::config::Config;
 use crate::model::{AppState, StatusLevel};
 use chrono::{DateTime, Utc};
-use eframe::egui::{self, Align2, Color32, Rect, Stroke, StrokeKind, pos2, vec2};
+use egui::{self, Align2, Color32, Rect, Stroke, StrokeKind, pos2, vec2};
 use feeds::{Mode, Wall};
 use monitor::{Fx, text};
 use std::collections::HashMap;

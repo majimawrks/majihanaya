@@ -39,7 +39,7 @@ pub struct Feed {
     pub reset_b: String,
     /// Top-right burn-in: the feed timestamp, or LIMIT / VIA DESKTOP / RETRYING.
     pub tag: String,
-    pub tag_color: eframe::egui::Color32,
+    pub tag_color: egui::Color32,
     pub extras: Vec<Extra>,
     /// Which source refreshes this screen ("claude" / "codex"): drives the sweep.
     pub source: &'static str,
@@ -57,7 +57,7 @@ impl Feed {
 pub struct Section {
     pub name: &'static str,
     pub plan: String,
-    pub plan_color: eframe::egui::Color32,
+    pub plan_color: egui::Color32,
     pub email: Option<String>,
     pub notice: Option<String>,
     pub feeds: Vec<Feed>,

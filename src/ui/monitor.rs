@@ -4,10 +4,10 @@
 use super::feeds::{Extra, Feed, Mode};
 use super::textures::Textures;
 use super::theme::{self, Phosphor, chrome, vt};
-use eframe::egui::{
+use egui::{
     self, Align2, Color32, CornerRadius, FontId, Painter, Pos2, Rect, Stroke, StrokeKind, Vec2, epaint, pos2, vec2,
 };
-use eframe::egui::text::{LayoutJob, TextFormat};
+use egui::text::{LayoutJob, TextFormat};
 
 pub const BEZEL_PAD: f32 = 5.0;
 pub const SCREEN_PAD: Vec2 = vec2(10.0, 6.0);

@@ -1,6 +1,6 @@
 //! Colours and type from the design's Spec board ("the Florist's monitor room").
 
-use eframe::egui::{self, Color32, FontData, FontDefinitions, FontFamily, FontId};
+use egui::{self, Color32, FontData, FontDefinitions, FontFamily, FontId};
 use std::sync::Arc;
 
 pub const fn hex(rgb: u32) -> Color32 {
@@ -28,7 +28,7 @@ pub const LOST: Phosphor = Phosphor { fg: hex(0xD9DCD3), dim: hex(0x8B9086), bg:
 /// Chrome (Spec board, "CHROME").
 pub mod chrome {
     use super::hex;
-    use eframe::egui::Color32;
+    use egui::Color32;
     pub const RACK: Color32 = hex(0x0C0D0B);
     pub const BORDER: Color32 = hex(0x2B2D28);
     pub const BEZEL: Color32 = hex(0x1B1C19);
