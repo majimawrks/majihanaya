@@ -73,9 +73,14 @@ pub fn draw(
         if config.show_sessions {
             let waiting = state.sessions.list.iter().any(|s| matches!(s.status, SessionStatus::Waiting(_)));
             let stroke = (waiting && blink_on).then_some(chrome::AMBER);
+            let mut desktop_rows = Vec::new();
             monitor::monitor(ui, tex, col_w, SESSIONS_H, bg, stroke, Fx::default(), |p, r| {
-                sessions_screen(p, r, state, tz, blink_on);
+                desktop_rows = sessions_screen(p, r, state, tz, blink_on);
             });
+            for (i, row) in desktop_rows.into_iter().enumerate() {
+                ui.interact(row, ui.scope_id().with(("desktop-session", i)), egui::Sense::hover())
+                    .on_hover_text(DESKTOP_NOTE);
+            }
         }
         monitor::monitor(ui, tex, col_w, CLOCKS_H, bg, None, Fx::default(), |p, r| {
             clocks_screen(p, r, &clock_rows(state, config, now, tz), tz);
@@ -183,7 +188,11 @@ fn session_meta(s: &Session) -> String {
     }
 }
 
-fn sessions_screen(p: &Painter, r: Rect, state: &AppState, tz: FixedOffset, blink_on: bool) {
+/// Hover text for a Claude Desktop row: why it shows only a project.
+const DESKTOP_NOTE: &str = "Claude Desktop runs all of its Claude Code sessions in one process and writes a single entry for them in ~/.claude/sessions, so this row stands for every Desktop session. It shows the project of the most recent one; the conversation name in that entry is often stale, so it isn't shown. Sessions started from a terminal get one row each.";
+
+/// Draws the rows; returns the rects of Claude Desktop rows (for hover help).
+fn sessions_screen(p: &Painter, r: Rect, state: &AppState, tz: FixedOffset, blink_on: bool) -> Vec<Rect> {
     header(p, r, "CAM 04 · SESSIONS", &clock_of(state.sessions.last_success, tz));
     let list = &state.sessions.list;
     // Rows are 22 high, 4 apart, below the header; they may use the screen's padding.
@@ -194,14 +203,19 @@ fn sessions_screen(p: &Painter, r: Rect, state: &AppState, tz: FixedOffset, blin
         max += 1;
     }
     let (shown, more) = if list.len() > max { (max.saturating_sub(1), list.len() - max.saturating_sub(1)) } else { (list.len(), 0) };
+    let mut desktop = Vec::new();
     for (i, s) in list.iter().take(shown).enumerate() {
         let row = Rect::from_min_size(pos2(r.left() - 4.0, top + i as f32 * 26.0), vec2(r.width() + 8.0, 22.0));
         session_row(p, row, s, blink_on);
+        if is_desktop(s) {
+            desktop.push(row);
+        }
     }
     if more > 0 && max > 0 {
         let y = top + shown as f32 * 26.0 + 11.0;
         text(p, pos2(r.left() + 50.0 + 8.0, y), Align2::LEFT_CENTER, &format!("+{more} MORE"), vt(16.0), theme::OK.dim, 0.0);
     }
+    desktop
 }
 
 fn session_row(p: &Painter, row: Rect, s: &Session, blink_on: bool) {
@@ -221,12 +235,13 @@ fn session_row(p: &Painter, row: Rect, s: &Session, blink_on: bool) {
     let name_x = x0 + 50.0 + 8.0;
     let room = meta.left() - 8.0 - name_x;
     // "MAJIHANAYA · Plan review": the project (the session's folder) first,
-    // the conversation name dimmed after it. Claude Desktop keeps one entry
-    // for all its sessions, so its row shows its most recent project.
+    // the conversation name dimmed after it. Claude Desktop rows show the
+    // project only: its single shared entry's name is often stale (see
+    // DESKTOP_NOTE, shown on hover).
     let project = project_of(s);
     let lead_text = fit(p, &project.to_uppercase(), &vt(17.0), room);
     let lead = text(p, pos2(name_x, mid), Align2::LEFT_CENTER, &lead_text, vt(17.0), name_fg, 1.0);
-    if !s.name.eq_ignore_ascii_case(&project) {
+    if !is_desktop(s) && !s.name.eq_ignore_ascii_case(&project) {
         let x = lead.right() + 6.0;
         let rest = fit(p, &format!("· {}", s.name), &mono(11.0), meta.left() - 8.0 - x);
         text(p, pos2(x, mid), Align2::LEFT_CENTER, &rest, mono(11.0), chrome::MUTED, 0.0);
