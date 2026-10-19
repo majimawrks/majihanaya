@@ -25,22 +25,23 @@ pub fn parse_summary_for(json: &str, relevant: fn(&str) -> bool) -> Option<(Stat
     v.get("status")?.get("indicator")?.as_str()?;
     let empty = Vec::new();
     let name = |x: &Value| x.get("name").and_then(Value::as_str).unwrap_or("").to_string();
-    let statuses: Vec<String> = v
+    let comps: Vec<(String, String)> = v
         .get("components")
         .and_then(Value::as_array)
         .unwrap_or(&empty)
         .iter()
         .filter(|c| c.get("group").and_then(Value::as_bool) != Some(true) && relevant(&name(c)))
-        .map(|c| c.get("status").and_then(Value::as_str).unwrap_or("operational").to_string())
+        .map(|c| (name(c), c.get("status").and_then(Value::as_str).unwrap_or("operational").to_string()))
         .collect();
+    let statuses: Vec<&str> = comps.iter().map(|(_, s)| s.as_str()).collect();
     // No relevant component at all: the page changed shape, not a healthy
     // service. Report unavailable (keeping the last known status).
     if statuses.is_empty() {
         return None;
     }
-    let level = if statuses.iter().any(|s| s == "major_outage") {
+    let level = if statuses.contains(&"major_outage") {
         StatusLevel::Red
-    } else if statuses.iter().any(|s| s != "operational") {
+    } else if statuses.iter().any(|s| *s != "operational") {
         StatusLevel::Yellow
     } else {
         StatusLevel::Green
@@ -59,10 +60,27 @@ pub fn parse_summary_for(json: &str, relevant: fn(&str) -> bool) -> Option<(Stat
         .collect();
     // A relevant incident while every component still reads operational is degraded.
     let level = if level == StatusLevel::Green && !names.is_empty() { StatusLevel::Yellow } else { level };
+    // Say what is affected: incident names, else the components that aren't
+    // operational ("Responses API degraded"), deduplicated.
+    let mut affected: Vec<String> = Vec::new();
+    for (n, s) in comps.iter().filter(|(_, s)| s != "operational") {
+        let what = if n.eq_ignore_ascii_case("responses") { "Responses API".to_string() } else { n.clone() };
+        let how = match s.as_str() {
+            "degraded_performance" => "degraded",
+            "partial_outage" => "partial outage",
+            "major_outage" => "outage",
+            "under_maintenance" => "maintenance",
+            other => other,
+        };
+        let line = format!("{what} {how}");
+        if !affected.contains(&line) {
+            affected.push(line);
+        }
+    }
     let text = match level {
         StatusLevel::Green => String::new(),
         _ if !names.is_empty() => names.join("; "),
-        _ if statuses.iter().any(|s| s == "under_maintenance") => "maintenance".into(),
+        _ if !affected.is_empty() => affected.join("; "),
         _ => "some issues".into(),
     };
     Some((level, text))
@@ -190,7 +208,10 @@ mod tests {
         };
         // Sora down, Codex fine: green despite the page-wide "major".
         assert_eq!(parse_summary_for(&page("major_outage", "operational", ""), codex_relevant), Some((StatusLevel::Green, String::new())));
-        assert_eq!(parse_summary_for(&page("operational", "major_outage", ""), codex_relevant).unwrap().0, StatusLevel::Red);
+        assert_eq!(
+            parse_summary_for(&page("operational", "major_outage", ""), codex_relevant),
+            Some((StatusLevel::Red, "Codex in ChatGPT Desktop outage".into()))
+        );
         let inc = r#"{"name":"Elevated Codex errors","status":"investigating","components":[]}"#;
         assert_eq!(
             parse_summary_for(&page("operational", "operational", inc), codex_relevant),

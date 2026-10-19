@@ -98,6 +98,28 @@ impl Window {
 
     /// Moves the window so its *visible* frame (title bar included, invisible
     /// resize borders excluded) sits in the tray corner of the work area.
+    /// Resizes to `w`×`h` physical px in ONE move, keeping the corner nearest
+    /// the tray where it is (so the window grows away from the tray, with no
+    /// in-between size-then-move steps on screen).
+    pub fn resize_anchored(self, w: i32, h: i32) {
+        use windows::Win32::Foundation::RECT;
+        use windows::Win32::UI::WindowsAndMessaging::{GetWindowRect, SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos};
+        let corner = tray_corner().map_or(Corner::BottomRight, |(_, c, _)| c);
+        // SAFETY: queries and moves our own window.
+        unsafe {
+            let mut r = RECT::default();
+            if GetWindowRect(self.hwnd(), &mut r).is_err() {
+                return;
+            }
+            if (r.right - r.left, r.bottom - r.top) == (w, h) {
+                return;
+            }
+            let x = if corner == Corner::BottomLeft { r.left } else { r.right - w };
+            let y = if corner == Corner::TopRight { r.top } else { r.bottom - h };
+            let _ = SetWindowPos(self.hwnd(), None, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+    }
+
     pub fn snap_to_tray_corner(self) {
         use windows::Win32::Foundation::RECT;
         use windows::Win32::Graphics::Dwm::{DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
@@ -188,6 +210,20 @@ pub fn set_autostart(on: bool) -> windows::core::Result<()> {
         };
         let _ = RegCloseKey(key);
         result
+    }
+}
+
+/// Whether the point (logical points at the system scale) a little inside a
+/// window's top-left corner is on any monitor.
+pub fn logical_on_screen(x: f32, y: f32) -> bool {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTONULL, MonitorFromPoint};
+    use windows::Win32::UI::HiDpi::GetDpiForSystem;
+    // SAFETY: plain queries.
+    unsafe {
+        let s = GetDpiForSystem() as f32 / 96.0;
+        let p = POINT { x: ((x + 24.0) * s) as i32, y: ((y + 12.0) * s) as i32 };
+        !MonitorFromPoint(p, MONITOR_DEFAULTTONULL).is_invalid()
     }
 }
 

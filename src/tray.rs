@@ -11,6 +11,7 @@ pub struct Ids {
     settings: MenuId,
     larger: MenuId,
     smaller: MenuId,
+    reset_position: MenuId,
     open_config: MenuId,
     autostart: MenuId,
     exit: MenuId,
@@ -22,6 +23,8 @@ pub enum Action {
     Settings,
     Larger,
     Smaller,
+    /// Back beside the tray (also reachable when the window is off-screen).
+    ResetPosition,
     OpenConfig,
     /// The menu has already flipped the check mark; read it with `autostart_checked`.
     Autostart,
@@ -45,6 +48,7 @@ impl Tray {
         let settings = MenuItem::new("Settings…", true, None);
         let larger = MenuItem::new("Larger", true, None);
         let smaller = MenuItem::new("Smaller", true, None);
+        let reset_position = MenuItem::new("Reset position", true, None);
         let open_config = MenuItem::new("Open config", true, None);
         let autostart = CheckMenuItem::new("Start with Windows", true, autostart_on, None);
         let exit = MenuItem::new("Exit", true, None);
@@ -55,6 +59,7 @@ impl Tray {
             &PredefinedMenuItem::separator(),
             &larger,
             &smaller,
+            &reset_position,
             &PredefinedMenuItem::separator(),
             &open_config,
             &autostart,
@@ -75,6 +80,7 @@ impl Tray {
             settings: settings.id().clone(),
             larger: larger.id().clone(),
             smaller: smaller.id().clone(),
+            reset_position: reset_position.id().clone(),
             open_config: open_config.id().clone(),
             autostart: autostart.id().clone(),
             exit: exit.id().clone(),
@@ -130,6 +136,8 @@ pub fn menu_action(event: &MenuEvent, ids: &Ids) -> Option<Action> {
         Action::Larger
     } else if id == &ids.smaller {
         Action::Smaller
+    } else if id == &ids.reset_position {
+        Action::ResetPosition
     } else if id == &ids.open_config {
         Action::OpenConfig
     } else if id == &ids.autostart {

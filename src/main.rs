@@ -51,8 +51,9 @@ fn main() -> eframe::Result {
     if config.topmost {
         viewport = viewport.with_always_on_top();
     }
-    // Saved drag position wins; otherwise sit beside the tray.
-    let saved = config.left.zip(config.top).map(|(x, y)| [x, y]);
+    // Saved drag position wins while it's still on a monitor; otherwise
+    // (or after a monitor is gone) sit beside the tray.
+    let saved = config.left.zip(config.top).map(|(x, y)| [x, y]).filter(|&[x, y]| platform::logical_on_screen(x, y));
     if let Some(pos) = saved.or_else(|| platform::default_position(size)) {
         viewport = viewport.with_position(pos);
     }
@@ -131,7 +132,8 @@ impl App {
             _ => return Err("expected a Win32 window".into()),
         };
         cc.egui_ctx.set_zoom_factor(config.scale);
-        if config.left.is_none() || config.top.is_none() {
+        let saved_ok = config.left.zip(config.top).is_some_and(|(x, y)| platform::logical_on_screen(x, y));
+        if !saved_ok {
             window.snap_to_tray_corner();
         }
 
@@ -185,23 +187,25 @@ impl App {
         })
     }
 
-    /// Resizes the viewport to the content, keeping the corner nearest the
-    /// tray where it is (the window grows away from the tray).
+    /// Forgets the dragged position and puts the window back beside the tray
+    /// (title-bar triple-click, or the tray menu when it's off-screen).
+    fn reset_position(&mut self) {
+        self.dragging = None;
+        self.config.left = None;
+        self.config.top = None;
+        self.save_config();
+        self.window.snap_to_tray_corner();
+    }
+
+    /// Resizes the window to the content in one move, keeping the corner
+    /// nearest the tray where it is (the window grows away from the tray).
     fn fit(&mut self, ctx: &egui::Context, size: egui::Vec2) {
         if (size - self.size).length() < 0.5 {
             return;
         }
-        let delta = size - self.size;
         self.size = size;
-        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
-        if let Some(outer) = ctx.input(|i| i.viewport().outer_rect) {
-            let corner = platform::tray_corner().map_or(platform::Corner::BottomRight, |(_, c, _)| c);
-            let dx = if corner == platform::Corner::BottomLeft { 0.0 } else { delta.x };
-            let dy = if corner == platform::Corner::TopRight { 0.0 } else { delta.y };
-            let to = outer.min - egui::vec2(dx, dy);
-            self.pos = Some(to);
-            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(to));
-        }
+        let ppp = ctx.pixels_per_point();
+        self.window.resize_anchored((size.x * ppp).round() as i32, (size.y * ppp).round() as i32);
     }
 
     /// Saves the position after a title-bar drag, once the window stops
@@ -301,6 +305,10 @@ impl App {
                 self.ui.open_settings(&self.config);
                 self.window.show();
             }
+            tray::Action::ResetPosition => {
+                self.reset_position();
+                self.window.show();
+            }
             tray::Action::Autostart => {
                 let want = self.tray.autostart_checked();
                 if platform::set_autostart(want).is_err() {
@@ -355,6 +363,7 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         ui.set_opacity(self.config.opacity.clamp(0.5, 1.0));
+        let view_before = self.ui.view;
         let (size, actions) = {
             let s = model::lock(&self.state);
             self.ui.draw(ui, &s, &self.config)
@@ -367,11 +376,16 @@ impl eframe::App for App {
                     self.dragging = Some(std::time::Instant::now());
                     ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
                 }
+                ui::Action::ResetPosition => self.reset_position(),
                 ui::Action::OpenConfig => open_config_file(),
                 ui::Action::Apply(cfg, autostart) => self.apply_settings(&ctx, *cfg, autostart, true),
             }
         }
-        self.fit(&ctx, size.ceil());
+        // A click switched views during this pass, so its size is the old
+        // view's: skip it (no in-between resize); the next frame fits.
+        if self.ui.view == view_before {
+            self.fit(&ctx, size.ceil());
+        }
         self.track_position(&ctx);
     }
 

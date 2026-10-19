@@ -40,6 +40,9 @@ pub enum View {
 pub enum Action {
     Hide,
     StartDrag,
+    /// Triple-click on the title bar: forget the dragged position and go
+    /// back beside the tray.
+    ResetPosition,
     /// Settings applied: the new config and the Start-with-Windows choice.
     Apply(Box<Config>, bool),
     OpenConfig,
@@ -89,6 +92,7 @@ impl WindowUi {
         let now = Utc::now();
         let tz = *chrono::Local::now().offset();
         let wall = feeds::wall(state, config, now, tz);
+        let view_before = self.view;
         let mut actions = Vec::new();
         let width = if self.view == View::Compact { COMPACT_W } else { DETAILS_W };
 
@@ -101,7 +105,14 @@ impl WindowUi {
             .stroke(Stroke::new(1.0, chrome::BORDER))
             .corner_radius(10)
             .inner_margin(PAD);
-        let resp = frame.show(ui, |ui| {
+        // The content sizes the window, not the other way round: lay it out in
+        // an area as large as it may need, or a growing view (details,
+        // settings) is measured and clipped at the current window size and
+        // the window never grows. Drawing outside the window is just clipped
+        // until the resize lands a frame later.
+        let area = Rect::from_min_size(ui.max_rect().min, vec2(width, 4096.0));
+        let mut outer = ui.new_child(egui::UiBuilder::new().max_rect(area));
+        let resp = frame.show(&mut outer, |ui| {
             ui.set_width(width - 2.0 * PAD - 2.0);
             ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
             self.title_bar(ui, &wall, config, &mut actions);
@@ -128,6 +139,11 @@ impl WindowUi {
         });
         let size = resp.response.rect.size();
 
+        // A click switched views mid-frame: this frame was laid out for the
+        // old one, so draw the new one right away.
+        if self.view != view_before {
+            ctx.request_repaint();
+        }
         // Schedule only what's moving: sweeps/bursts at ~30 fps, blink at 1 Hz,
         // otherwise the next minute (countdowns).
         let blinking = wall.footer.busy + wall.footer.waiting > 0;
@@ -172,6 +188,9 @@ impl WindowUi {
         let (bar, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), egui::Sense::click_and_drag());
         if resp.drag_started() {
             actions.push(Action::StartDrag);
+        }
+        if resp.triple_clicked() {
+            actions.push(Action::ResetPosition);
         }
         let p = ui.painter();
         let led = if wall.powered { chrome::GREEN } else { theme::NO_DATA.fg };
