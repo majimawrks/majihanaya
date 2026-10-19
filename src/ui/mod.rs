@@ -40,6 +40,9 @@ pub enum View {
 pub enum Action {
     Hide,
     StartDrag,
+    /// Triple-click on the title bar: forget the dragged position and go
+    /// back beside the tray.
+    ResetPosition,
     /// Settings applied: the new config and the Start-with-Windows choice.
     Apply(Box<Config>, bool),
     OpenConfig,
@@ -89,6 +92,7 @@ impl WindowUi {
         let now = Utc::now();
         let tz = *chrono::Local::now().offset();
         let wall = feeds::wall(state, config, now, tz);
+        let view_before = self.view;
         let mut actions = Vec::new();
         let width = if self.view == View::Compact { COMPACT_W } else { DETAILS_W };
 
@@ -128,6 +132,11 @@ impl WindowUi {
         });
         let size = resp.response.rect.size();
 
+        // A click switched views mid-frame: this frame was laid out for the
+        // old one, so draw the new one right away.
+        if self.view != view_before {
+            ctx.request_repaint();
+        }
         // Schedule only what's moving: sweeps/bursts at ~30 fps, blink at 1 Hz,
         // otherwise the next minute (countdowns).
         let blinking = wall.footer.busy + wall.footer.waiting > 0;
@@ -172,6 +181,9 @@ impl WindowUi {
         let (bar, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), egui::Sense::click_and_drag());
         if resp.drag_started() {
             actions.push(Action::StartDrag);
+        }
+        if resp.triple_clicked() {
+            actions.push(Action::ResetPosition);
         }
         let p = ui.painter();
         let led = if wall.powered { chrome::GREEN } else { theme::NO_DATA.fg };

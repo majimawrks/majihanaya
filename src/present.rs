@@ -19,6 +19,8 @@ pub struct Presenter {
     dib: Option<(HBITMAP, HGDIOBJ, *mut u32)>,
     w: usize,
     h: usize,
+    /// The buffer changed size since the last present.
+    resized: bool,
 }
 
 impl Presenter {
@@ -31,7 +33,7 @@ impl Presenter {
             SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex | WS_EX_LAYERED.0 as isize);
             CreateCompatibleDC(None)
         };
-        Self { hwnd, dc, dib: None, w: 0, h: 0 }
+        Self { hwnd, dc, dib: None, w: 0, h: 0, resized: false }
     }
 
     /// Makes the back buffer `w`×`h`. `Ok(true)` when it was recreated (its
@@ -69,6 +71,7 @@ impl Presenter {
             self.dib = Some((bmp, old, bits.cast()));
             self.w = w;
             self.h = h;
+            self.resized = true;
         }
         Ok(true)
     }
@@ -89,7 +92,7 @@ impl Presenter {
 
     /// Shows the buffer. `pos` (physical px) moves the window in the same
     /// update; `opacity` multiplies every pixel's alpha.
-    pub fn present(&self, pos: Option<(i32, i32)>, opacity: f32) {
+    pub fn present(&mut self, pos: Option<(i32, i32)>, opacity: f32) {
         if self.dib.is_none() {
             return;
         }
@@ -104,7 +107,23 @@ impl Presenter {
         };
         // SAFETY: all pointers are to locals alive for the call.
         unsafe {
-            let _ = UpdateLayeredWindow(
+            // winit rewrites GWL_EXSTYLE from its own flags on state changes
+            // (visibility, topmost, …), dropping WS_EX_LAYERED: restore it.
+            let ex = GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE);
+            if self.resized {
+                // After the window grows, DWM keeps showing the old layered
+                // surface even though ULW succeeds; re-applying the layered
+                // style once makes it take the new size (measured).
+                SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, ex & !(WS_EX_LAYERED.0 as isize));
+            }
+            // Also restores the bit if winit rewrote GWL_EXSTYLE from its own
+            // flags (it does on visibility/topmost changes). Only when needed:
+            // a style write sends WM_STYLECHANGING/CHANGED.
+            if self.resized || ex & WS_EX_LAYERED.0 as isize == 0 {
+                SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, ex | WS_EX_LAYERED.0 as isize);
+            }
+            self.resized = false;
+            let r = UpdateLayeredWindow(
                 self.hwnd,
                 None,
                 dst.as_ref().map(|p| p as *const _),
@@ -115,6 +134,9 @@ impl Presenter {
                 Some(&blend),
                 ULW_ALPHA,
             );
+            if let Err(e) = r {
+                crate::logfile::ERRORS.line(&format!("UpdateLayeredWindow failed: {e}"));
+            }
         }
     }
 

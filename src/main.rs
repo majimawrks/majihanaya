@@ -172,6 +172,8 @@ struct App {
     /// The app's own next wake-up (minute timer, drag settle), handed to the
     /// shell after each event; independent of egui's repaint requests.
     wake: Option<Instant>,
+    /// The next frame moves the window back beside the tray (after a reset).
+    re_anchor: bool,
     /// Set when the user starts a title-bar drag: the time of the last move.
     /// The position is saved once moves stop for `DRAG_SETTLE`.
     dragging: Option<Instant>,
@@ -258,6 +260,7 @@ impl App {
             config_checked: Instant::now(),
             shown: false,
             wake: None,
+            re_anchor: false,
             dragging: None,
         })
     }
@@ -326,7 +329,11 @@ impl App {
     }
 
     fn paint(&mut self) {
-        let raw = self.egui_winit.take_egui_input(&self.window);
+        let mut raw = self.egui_winit.take_egui_input(&self.window);
+        // The content sizes the window, not the other way round: lay out in
+        // an unbounded area, or a growing view (details, settings) would be
+        // measured and clipped at the current, smaller window size.
+        raw.screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(8192.0, 8192.0)));
         let mut actions = Vec::new();
         let mut size = egui::Vec2::ZERO;
         let out = {
@@ -362,6 +369,7 @@ impl App {
             self.renderer.render(self.presenter.buffer(), w, h, &prims, ppp);
             let pos = self.place(old, (w, h));
             self.presenter.present(pos, self.config.opacity);
+            self.re_anchor = false;
         }
         self.renderer.free_textures(freed);
         if !self.shown {
@@ -376,6 +384,14 @@ impl App {
                     self.dragging = Some(Instant::now());
                     let _ = self.window.drag_window();
                 }
+                ui::Action::ResetPosition => {
+                    self.dragging = None;
+                    self.config.left = None;
+                    self.config.top = None;
+                    self.save_config();
+                    self.re_anchor = true;
+                    self.wake_in(Duration::ZERO);
+                }
                 ui::Action::OpenConfig => open_config_file(),
                 ui::Action::Apply(cfg, autostart) => self.apply_settings(*cfg, autostart, true),
             }
@@ -383,11 +399,12 @@ impl App {
     }
 
     /// Where the window goes for this frame (physical px), or `None` to stay.
-    /// First frame: the saved spot, else the tray corner. Later, on a size
-    /// change: shift so the corner nearest the tray stays put.
+    /// First frame (or after a position reset): the saved spot, else the
+    /// tray corner. Later, on a size change: shift so the corner nearest the
+    /// tray stays put.
     fn place(&self, old: (usize, usize), new: (usize, usize)) -> Option<(i32, i32)> {
         let corner = platform::tray_corner();
-        if !self.shown {
+        if !self.shown || self.re_anchor {
             // Saved in physical px (no per-monitor scale to get wrong), and
             // used only while that spot is still on a monitor.
             if let (Some(x), Some(y)) = (self.config.left, self.config.top) {
