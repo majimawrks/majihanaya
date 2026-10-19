@@ -158,6 +158,16 @@ fn status_look(s: &ServiceStatus) -> (Color32, String) {
 
 /// Claude Desktop runs all its sessions in one process, so its registry
 /// entry stands for every Desktop session (named after the latest one).
+/// The project a session runs in: the last folder of its working directory,
+/// else its name.
+fn project_of(s: &Session) -> String {
+    s.cwd
+        .as_deref()
+        .and_then(|c| std::path::Path::new(c.trim_end_matches(['\\', '/'])).file_name())
+        .and_then(|f| f.to_str())
+        .map_or_else(|| s.name.clone(), str::to_owned)
+}
+
 fn is_desktop(s: &Session) -> bool {
     s.entrypoint.as_deref().is_some_and(|e| e.to_lowercase().contains("desktop"))
 }
@@ -169,7 +179,7 @@ fn session_meta(s: &Session) -> String {
         SessionStatus::Waiting(Some(what)) if !what.is_empty() => what.to_uppercase(),
         SessionStatus::Waiting(_) => "WAITING".into(),
         // The Desktop row already says DESKTOP in its name.
-        SessionStatus::Idle => if is_desktop(s) { "IDLE" } else { "CLI" }.into(),
+        SessionStatus::Idle => if is_desktop(s) { "DESKTOP" } else { "CLI" }.into(),
     }
 }
 
@@ -210,15 +220,16 @@ fn session_row(p: &Painter, row: Rect, s: &Session, blink_on: bool) {
     let meta = text(p, pos2(x1, mid), Align2::RIGHT_CENTER, &session_meta(s), vt(16.0), meta_fg, 0.0);
     let name_x = x0 + 50.0 + 8.0;
     let room = meta.left() - 8.0 - name_x;
-    if is_desktop(s) {
-        // "CLAUDE DESKTOP · Plan review": one shared row, latest conversation dimmed.
-        let lead = text(p, pos2(name_x, mid), Align2::LEFT_CENTER, "CLAUDE DESKTOP", vt(17.0), name_fg, 1.0);
+    // "MAJIHANAYA · Plan review": the project (the session's folder) first,
+    // the conversation name dimmed after it. Claude Desktop keeps one entry
+    // for all its sessions, so its row shows its most recent project.
+    let project = project_of(s);
+    let lead_text = fit(p, &project.to_uppercase(), &vt(17.0), room);
+    let lead = text(p, pos2(name_x, mid), Align2::LEFT_CENTER, &lead_text, vt(17.0), name_fg, 1.0);
+    if !s.name.eq_ignore_ascii_case(&project) {
         let x = lead.right() + 6.0;
         let rest = fit(p, &format!("· {}", s.name), &mono(11.0), meta.left() - 8.0 - x);
         text(p, pos2(x, mid), Align2::LEFT_CENTER, &rest, mono(11.0), chrome::MUTED, 0.0);
-    } else {
-        let name = fit(p, &s.name, &mono(11.0), room);
-        text(p, pos2(name_x, mid), Align2::LEFT_CENTER, &name, mono(11.0), name_fg, 0.0);
     }
 }
 
@@ -354,7 +365,15 @@ mod tests {
         let s = |status, entrypoint: Option<&str>| Session { pid: 1, name: "x".into(), status, cwd: None, entrypoint: entrypoint.map(Into::into) };
         assert_eq!(session_meta(&s(SessionStatus::Working, None)), "BUSY");
         assert_eq!(session_meta(&s(SessionStatus::Waiting(Some("permission".into())), None)), "PERMISSION");
-        assert_eq!(session_meta(&s(SessionStatus::Idle, Some("claude-desktop"))), "IDLE");
+        assert_eq!(session_meta(&s(SessionStatus::Idle, Some("claude-desktop"))), "DESKTOP");
         assert_eq!(session_meta(&s(SessionStatus::Idle, None)), "CLI");
+    }
+
+    #[test]
+    fn project_from_cwd() {
+        let s = |cwd: Option<&str>| Session { pid: 1, name: "Plan review".into(), status: SessionStatus::Idle, cwd: cwd.map(Into::into), entrypoint: None };
+        assert_eq!(project_of(&s(Some(r"C:\Users\me\Lab\majihanaya"))), "majihanaya");
+        assert_eq!(project_of(&s(Some(r"C:\Users\me\Lab\majihanaya\"))), "majihanaya");
+        assert_eq!(project_of(&s(None)), "Plan review");
     }
 }
