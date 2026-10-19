@@ -336,6 +336,7 @@ impl App {
         raw.screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(8192.0, 8192.0)));
         let mut actions = Vec::new();
         let mut size = egui::Vec2::ZERO;
+        let view_before = self.ui.view;
         let out = {
             let (wui, state, config) = (&mut self.ui, &self.state, &self.config);
             self.ctx.run_ui(raw, |ui| {
@@ -352,7 +353,11 @@ impl App {
 
         let (w, h) = ((size.x * ppp).ceil().max(1.0) as usize, (size.y * ppp).ceil().max(1.0) as usize);
         let old = self.presenter.size();
-        let ready = match self.presenter.ensure_size(w, h) {
+        // A click switched views during this pass, so it was laid out for the
+        // old view: don't show it (that's a visible in-between size); the
+        // immediate next frame draws the new view.
+        let switched = self.ui.view != view_before && self.shown;
+        let ready = if switched { false } else { match self.presenter.ensure_size(w, h) {
             Ok(recreated) => {
                 if recreated {
                     self.renderer.invalidate();
@@ -364,7 +369,7 @@ impl App {
                 self.wake_in(Duration::from_secs(1));
                 false
             }
-        };
+        } };
         if ready {
             self.renderer.render(self.presenter.buffer(), w, h, &prims, ppp);
             let pos = self.place(old, (w, h));
