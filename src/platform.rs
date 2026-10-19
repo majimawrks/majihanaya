@@ -159,6 +159,14 @@ pub fn set_autostart(on: bool) -> windows::core::Result<()> {
     }
 }
 
+/// Whether a point (physical px, virtual screen) is on any monitor.
+pub fn on_screen(x: i32, y: i32) -> bool {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTONULL, MonitorFromPoint};
+    // SAFETY: plain query.
+    unsafe { !MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONULL).is_invalid() }
+}
+
 /// Which screen corner the window sits in: the one beside the tray.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Corner {

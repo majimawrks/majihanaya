@@ -34,14 +34,14 @@ impl Presenter {
         Self { hwnd, dc, dib: None, w: 0, h: 0 }
     }
 
-    /// Makes the back buffer `w`×`h`. Returns true if it was recreated (its
-    /// contents are then undefined: redraw everything).
-    pub fn ensure_size(&mut self, w: usize, h: usize) -> bool {
+    /// Makes the back buffer `w`×`h`. `Ok(true)` when it was recreated (its
+    /// contents are then undefined: redraw everything). `Err` when Windows
+    /// can't allocate it; the previous buffer is kept and stays presentable.
+    pub fn ensure_size(&mut self, w: usize, h: usize) -> Result<bool, ()> {
         let (w, h) = (w.max(1), h.max(1));
         if self.dib.is_some() && (w, h) == (self.w, self.h) {
-            return false;
+            return Ok(false);
         }
-        self.release();
         let info = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
                 biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
@@ -58,14 +58,19 @@ impl Presenter {
         // SAFETY: valid header; `bits` receives the DIB memory, owned by the
         // bitmap until `release` deletes it.
         unsafe {
-            if let Ok(bmp) = CreateDIBSection(Some(self.dc), &info, DIB_RGB_COLORS, &mut bits, None, 0) {
-                let old = SelectObject(self.dc, bmp.into());
-                self.dib = Some((bmp, old, bits.cast()));
-                self.w = w;
-                self.h = h;
+            let bmp = CreateDIBSection(Some(self.dc), &info, DIB_RGB_COLORS, &mut bits, None, 0).map_err(|_| ())?;
+            if bits.is_null() {
+                let _ = DeleteObject(bmp.into());
+                return Err(());
             }
+            // Only now drop the old buffer, then select the new one.
+            self.release();
+            let old = SelectObject(self.dc, bmp.into());
+            self.dib = Some((bmp, old, bits.cast()));
+            self.w = w;
+            self.h = h;
         }
-        true
+        Ok(true)
     }
 
     pub fn size(&self) -> (usize, usize) {

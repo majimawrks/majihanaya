@@ -44,6 +44,8 @@ pub struct Config {
     pub tray_number: TrayNumber,
     pub tray_reset_clock: bool,
     pub language: String,
+    /// Window position in physical pixels (virtual screen), saved after a
+    /// title-bar drag; `None` = beside the tray. Ignored when off-screen.
     pub left: Option<f32>,
     pub top: Option<f32>,
     /// Keys this version does not know, written back unchanged.

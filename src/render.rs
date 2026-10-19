@@ -59,7 +59,11 @@ fn argb(c: [u8; 4]) -> u32 {
 }
 
 impl Renderer {
-    pub fn update_textures(&mut self, mut delta: TexturesDelta) {
+    /// Applies new and updated textures. Returns the ids to free, which the
+    /// caller passes to `free_textures` only *after* rendering this frame
+    /// (a texture can be drawn in the very pass that drops its handle).
+    #[must_use]
+    pub fn update_textures(&mut self, mut delta: TexturesDelta) -> Vec<TextureId> {
         for (id, deltas) in std::mem::take(&mut delta.set) {
             for d in deltas {
                 let ImageData::Color(img) = &d.image;
@@ -76,6 +80,8 @@ impl Renderer {
                     }
                     Some([x0, y0]) => {
                         if let Some(t) = self.textures.get_mut(&id) {
+                            t.linear = linear;
+                            t.repeat = repeat;
                             let w = img.size[0];
                             for y in 0..img.size[1] {
                                 let row = (y0 + y) * t.w + x0;
@@ -89,7 +95,11 @@ impl Renderer {
                 }
             }
         }
-        for id in std::mem::take(&mut delta.free) {
+        std::mem::take(&mut delta.free).into_iter().collect()
+    }
+
+    pub fn free_textures(&mut self, ids: Vec<TextureId>) {
+        for id in ids {
             self.textures.remove(&id);
         }
     }
@@ -251,18 +261,27 @@ fn raster(target: &mut [u32], w: usize, tri: &Tri, tex: &Texture, r: [i32; 4]) {
         return;
     }
     let [a, b, c] = &tri.v;
-    let (ax, ay, bx, by, cx, cy) = (a.pos.x, a.pos.y, b.pos.x, b.pos.y, c.pos.x, c.pos.y);
-    let area = (bx - ax) * (cy - ay) - (cx - ax) * (by - ay);
+    // Work relative to vertex a: keeps the edge maths precise far from the
+    // window origin (no cancellation between large coordinates).
+    let (bx, by) = (b.pos.x - a.pos.x, b.pos.y - a.pos.y);
+    let (cx, cy) = (c.pos.x - a.pos.x, c.pos.y - a.pos.y);
+    let area = bx * cy - cx * by;
     if area.abs() < 1e-8 {
         return;
     }
     let inv = 1.0 / area;
-    // Weight of vertex a at (x, y) = e_a(x, y) / area, etc.; linear in x and y.
-    let e = |px: f32, py: f32, p: (f32, f32), q: (f32, f32)| ((q.0 - px) * (p.1 - py) - (p.0 - px) * (q.1 - py)) * inv;
-    let wa = |x: f32, y: f32| e(x, y, (cx, cy), (bx, by));
-    let wb = |x: f32, y: f32| e(x, y, (ax, ay), (cx, cy));
-    let (dwa_dx, dwb_dx) = (wa(1.0, 0.0) - wa(0.0, 0.0), wb(1.0, 0.0) - wb(0.0, 0.0));
-    let (dwa_dy, dwb_dy) = (wa(0.0, 1.0) - wa(0.0, 0.0), wb(0.0, 1.0) - wb(0.0, 0.0));
+    // Barycentric weights (positive inside whatever the winding), with
+    // their exact derivatives: wb = (x·cy − y·cx)/area, wa likewise, wc = 1 − wa − wb.
+    let wa = |x: f32, y: f32| ((bx - x) * (cy - y) - (cx - x) * (by - y)) * inv;
+    let wb = |x: f32, y: f32| (x * cy - y * cx) * inv;
+    let (dwa_dx, dwa_dy) = ((by - cy) * inv, (cx - bx) * inv);
+    let (dwb_dx, dwb_dy) = (cy * inv, -cx * inv);
+    let (dwc_dx, dwc_dy) = (-dwa_dx - dwb_dx, -dwa_dy - dwb_dy);
+    // Top-left fill rule: a pixel centre exactly on an edge belongs to the
+    // triangle only if that edge is a top or left edge, so two triangles
+    // sharing an edge never both paint it (no double-blended seams).
+    let owns = |gx: f32, gy: f32| if gx.abs() < 1e-12 { gy > 0.0 } else { gx > 0.0 };
+    let incl = [owns(dwa_dx, dwa_dy), owns(dwb_dx, dwb_dy), owns(dwc_dx, dwc_dy)];
 
     let col = |v: &Vertex| {
         let c = v.color.to_array();
@@ -278,20 +297,24 @@ fn raster(target: &mut [u32], w: usize, tri: &Tri, tex: &Texture, r: [i32; 4]) {
         std::array::from_fn::<f32, 4, _>(|i| ca[i] * t[i] / 255.0)
     });
 
-    const EPS: f32 = -1e-5;
-    let (sx, sy) = (x0 as f32 + 0.5, y0 as f32 + 0.5);
-    let mut row_a = wa(sx, sy);
-    let mut row_b = wb(sx, sy);
+    // Weights within TOL of 0 count as "on the edge" (float noise).
+    const TOL: f32 = 1e-6;
+    let sx = x0 as f32 + 0.5 - a.pos.x;
     for y in y0..y1 {
-        // Span where all three weights are ≥ 0, from the row's linear forms.
+        // Evaluated fresh per row (no accumulated error down tall triangles).
+        let sy = y as f32 + 0.5 - a.pos.y;
+        let (row_a, row_b) = (wa(sx, sy), wb(sx, sy));
+        // Span where every weight passes its edge test, from the row's linear forms.
         let (mut lo, mut hi) = (x0 as f32, x1 as f32);
-        for (w0, d) in [(row_a, dwa_dx), (row_b, dwb_dx), (1.0 - row_a - row_b, -dwa_dx - dwb_dx)] {
+        for (i, (w0, d)) in [(row_a, dwa_dx), (row_b, dwb_dx), (1.0 - row_a - row_b, dwc_dx)].into_iter().enumerate() {
+            // Owned edges keep w ≥ 0; others need w > 0.
+            let thr = if incl[i] { -TOL } else { TOL };
             if d.abs() < 1e-12 {
-                if w0 < EPS {
+                if w0 < thr {
                     hi = lo; // no pixel on this row
                 }
             } else {
-                let t = (EPS - w0) / d; // pixels from x0 where the weight crosses EPS
+                let t = (thr - w0) / d; // pixels from x0 where the weight crosses thr
                 if d > 0.0 {
                     lo = lo.max(x0 as f32 + t.ceil());
                 } else {
@@ -329,8 +352,6 @@ fn raster(target: &mut [u32], w: usize, tri: &Tri, tex: &Texture, r: [i32; 4]) {
                 }
             }
         }
-        row_a += dwa_dy;
-        row_b += dwb_dy;
     }
 }
 
@@ -345,7 +366,7 @@ mod tests {
         let mut d = TexturesDelta::default();
         let img = ColorImage::new([1, 1], vec![Color32::WHITE]);
         d.set.insert(TextureId::Managed(0), [ImageDelta::full(img, TextureOptions::NEAREST)].into_iter().collect());
-        r.update_textures(d);
+        let _ = r.update_textures(d);
     }
 
     fn rect_mesh(x0: f32, y0: f32, x1: f32, y1: f32, c: Color32) -> ClippedPrimitive {
@@ -372,6 +393,45 @@ mod tests {
         assert!(((p >> 16) & 0xFF).abs_diff(127) <= 1, "{p:08x}");
         // 50% black over transparent: premultiplied (0,0,0,128).
         assert_eq!(buf[18 * w + 22], 0x8000_0000);
+    }
+
+    fn tri_mesh(p: [(f32, f32); 3], c: Color32) -> ClippedPrimitive {
+        let mut m = Mesh::default();
+        for (x, y) in p {
+            m.colored_vertex(Pos2::new(x, y), c);
+        }
+        m.add_triangle(0, 1, 2);
+        ClippedPrimitive { clip_rect: ERect::EVERYTHING, primitive: Primitive::Mesh(m) }
+    }
+
+    #[test]
+    fn shared_edges_are_painted_once() {
+        // A translucent square split on its diagonal: the diagonal passes
+        // through pixel centres, which must not be blended twice.
+        let mut r = Renderer::default();
+        white_tex(&mut r);
+        let (w, h) = (16, 16);
+        let mut buf = vec![0u32; w * h];
+        let c = Color32::from_black_alpha(128);
+        let prims = [rect_mesh(2.0, 2.0, 10.0, 10.0, c)];
+        r.render(&mut buf, w, h, &prims, 1.0);
+        for y in 2..10 {
+            for x in 2..10 {
+                assert_eq!(buf[y * w + x], 0x8000_0000, "pixel ({x},{y})");
+            }
+        }
+    }
+
+    #[test]
+    fn small_triangles_far_from_origin_keep_their_pixels() {
+        // From review: cancellation in the derivatives dropped (508, 500).
+        let mut r = Renderer::default();
+        white_tex(&mut r);
+        let (w, h) = (520, 510);
+        let mut buf = vec![0u32; w * h];
+        let prims = [tri_mesh([(500.1, 500.2), (510.3, 500.2), (500.1, 501.9)], Color32::WHITE)];
+        r.render(&mut buf, w, h, &prims, 1.0);
+        assert_eq!(buf[500 * w + 508], 0xFFFF_FFFF);
     }
 
     #[test]
@@ -402,7 +462,7 @@ mod tests {
             TextureId::Managed(0),
             [ImageDelta::full(ColorImage::new([1, 1], vec![Color32::BLUE]), TextureOptions::NEAREST)].into_iter().collect(),
         );
-        r.update_textures(d);
+        let _ = r.update_textures(d);
         assert_eq!(r.render(&mut buf, w, h, &p, 1.0).len(), 1);
         assert_eq!(buf[5 * w + 5], argb(Color32::BLUE.to_array()));
     }

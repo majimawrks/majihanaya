@@ -53,8 +53,12 @@ fn main() {
         let _ = p.send_event(Wake::At(Instant::now() + info.delay.min(Duration::from_secs(3600))));
     });
     let state: model::Shared = Default::default();
-    let c = ctx.clone();
-    spawn_workers(&state, &config, Arc::new(move || c.request_repaint()));
+    // Workers wake the shell directly, not through egui: while hidden no
+    // egui pass runs, and egui then stops forwarding repaint requests.
+    let p = proxy.clone();
+    spawn_workers(&state, &config, Arc::new(move || {
+        let _ = p.send_event(Wake::At(Instant::now()));
+    }));
     let mut shell = Shell { ctx, proxy, config: Some(config), state, app: None, next: None };
     let _ = event_loop.run_app(&mut shell);
 }
@@ -120,8 +124,10 @@ impl ApplicationHandler<Wake> for Shell {
 
     fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         let Some(app) = self.app.as_mut() else { return };
-        if app.on_window_event(&event) {
-            self.wake_at(Instant::now());
+        let now = app.on_window_event(&event).then(Instant::now);
+        let own = app.wake.take();
+        for t in [now, own].into_iter().flatten() {
+            self.wake_at(t);
         }
         self.schedule(el);
     }
@@ -132,6 +138,9 @@ impl ApplicationHandler<Wake> for Shell {
             if let Some(app) = self.app.as_mut() {
                 app.frame();
             }
+        }
+        if let Some(t) = self.app.as_mut().and_then(|a| a.wake.take()) {
+            self.wake_at(t);
         }
         self.schedule(el);
     }
@@ -160,6 +169,9 @@ struct App {
     config_checked: Instant,
     /// Shown at least once (the first frame shows it without focus).
     shown: bool,
+    /// The app's own next wake-up (minute timer, drag settle), handed to the
+    /// shell after each event; independent of egui's repaint requests.
+    wake: Option<Instant>,
     /// Set when the user starts a title-bar drag: the time of the last move.
     /// The position is saved once moves stop for `DRAG_SETTLE`.
     dragging: Option<Instant>,
@@ -203,15 +215,15 @@ impl App {
 
         // Tray handlers run on this thread inside the message loop, hidden
         // or not; they act on the window directly and wake a frame.
-        let c = ctx.clone();
+        let p = proxy.clone();
         TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
             if let Some(tray::Action::Toggle) = tray::tray_action(&event) {
                 hwnd.toggle();
-                c.request_repaint();
+                let _ = p.send_event(Wake::At(Instant::now()));
             }
         }));
         let (tx, actions) = mpsc::channel();
-        let (ids, quit, c) = (tray.ids.clone(), quitting.clone(), ctx.clone());
+        let (ids, quit) = (tray.ids.clone(), quitting.clone());
         MenuEvent::set_event_handler(Some(move |event: MenuEvent| match tray::menu_action(&event, &ids) {
             Some(tray::Action::Refresh) => model::REFRESH.trigger(),
             Some(tray::Action::OpenConfig) => open_config_file(),
@@ -221,7 +233,7 @@ impl App {
             }
             Some(other) => {
                 let _ = tx.send(other);
-                c.request_repaint();
+                let _ = proxy.send_event(Wake::At(Instant::now()));
             }
             None => {}
         }));
@@ -245,8 +257,14 @@ impl App {
             last_written: None,
             config_checked: Instant::now(),
             shown: false,
+            wake: None,
             dragging: None,
         })
+    }
+
+    fn wake_in(&mut self, d: Duration) {
+        let at = Instant::now() + d;
+        self.wake = Some(self.wake.map_or(at, |w| w.min(at)));
     }
 
     /// Input and window events; true when a frame should follow.
@@ -261,7 +279,7 @@ impl App {
             }
             WindowEvent::Moved(_) if self.dragging.is_some() => {
                 self.dragging = Some(Instant::now());
-                self.ctx.request_repaint_after(DRAG_SETTLE);
+                self.wake_in(DRAG_SETTLE);
                 false
             }
             _ => self.egui_winit.on_window_event(&self.window, event).repaint,
@@ -304,7 +322,7 @@ impl App {
         // Countdowns and staleness move with the clock: look again at the
         // next minute boundary (one wake-up a minute, hidden or not).
         let secs = 60 - (now.timestamp().rem_euclid(60)) as u64;
-        self.ctx.request_repaint_after(Duration::from_secs(secs));
+        self.wake_in(Duration::from_secs(secs));
     }
 
     fn paint(&mut self) {
@@ -321,18 +339,31 @@ impl App {
             })
         };
         self.egui_winit.handle_platform_output(&self.window, out.platform_output);
-        self.renderer.update_textures(out.textures_delta);
+        let freed = self.renderer.update_textures(out.textures_delta);
         let ppp = out.pixels_per_point;
         let prims = self.ctx.tessellate(out.shapes, ppp);
 
         let (w, h) = ((size.x * ppp).ceil().max(1.0) as usize, (size.y * ppp).ceil().max(1.0) as usize);
         let old = self.presenter.size();
-        if self.presenter.ensure_size(w, h) {
-            self.renderer.invalidate();
+        let ready = match self.presenter.ensure_size(w, h) {
+            Ok(recreated) => {
+                if recreated {
+                    self.renderer.invalidate();
+                }
+                true
+            }
+            // Out of GDI memory: keep showing the last frame, try again soon.
+            Err(()) => {
+                self.wake_in(Duration::from_secs(1));
+                false
+            }
+        };
+        if ready {
+            self.renderer.render(self.presenter.buffer(), w, h, &prims, ppp);
+            let pos = self.place(old, (w, h));
+            self.presenter.present(pos, self.config.opacity);
         }
-        self.renderer.render(self.presenter.buffer(), w, h, &prims, ppp);
-        let pos = self.place(old, (w, h));
-        self.presenter.present(pos, self.config.opacity);
+        self.renderer.free_textures(freed);
         if !self.shown {
             self.shown = true;
             self.hwnd.show_no_activate();
@@ -357,9 +388,13 @@ impl App {
     fn place(&self, old: (usize, usize), new: (usize, usize)) -> Option<(i32, i32)> {
         let corner = platform::tray_corner();
         if !self.shown {
+            // Saved in physical px (no per-monitor scale to get wrong), and
+            // used only while that spot is still on a monitor.
             if let (Some(x), Some(y)) = (self.config.left, self.config.top) {
-                let scale = self.window.scale_factor();
-                return Some(((x as f64 * scale).round() as i32, (y as f64 * scale).round() as i32));
+                let (x, y) = (x.round() as i32, y.round() as i32);
+                if platform::on_screen(x + 8, y + 8) {
+                    return Some((x, y));
+                }
             }
             let ((l, t, r, b), c, s) = corner?;
             let gap = (12.0 * s).round() as i32;
@@ -383,14 +418,13 @@ impl App {
     fn save_dragged_position(&mut self) {
         let Some(last_move) = self.dragging else { return };
         if last_move.elapsed() < DRAG_SETTLE {
-            self.ctx.request_repaint_after(DRAG_SETTLE);
+            self.wake_in(DRAG_SETTLE);
             return;
         }
         self.dragging = None;
         if let Ok(p) = self.window.outer_position() {
-            let scale = self.window.scale_factor();
-            self.config.left = Some((p.x as f64 / scale) as f32);
-            self.config.top = Some((p.y as f64 / scale) as f32);
+            self.config.left = Some(p.x as f32);
+            self.config.top = Some(p.y as f32);
             self.save_config();
         }
     }
