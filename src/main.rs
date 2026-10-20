@@ -28,6 +28,8 @@ fn main() -> eframe::Result {
     }
 
     logfile::install_panic_hook();
+    // Started by Restart: let the old instance finish exiting first.
+    platform::wait_for_predecessor();
     let Some(_instance) = platform::single_instance() else {
         platform::activate_existing();
         return Ok(());
@@ -177,6 +179,13 @@ impl App {
                 quit.store(true, Ordering::SeqCst);
                 window.post_close();
             }
+            Some(tray::Action::Restart) => match platform::spawn_successor() {
+                Ok(()) => {
+                    quit.store(true, Ordering::SeqCst);
+                    window.post_close();
+                }
+                Err(e) => logfile::ERRORS.line(&format!("restart failed: {e}")),
+            },
             Some(other) => {
                 // `logic` runs on request_repaint even while the window is hidden.
                 let _ = tx.send(other);

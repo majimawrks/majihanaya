@@ -48,6 +48,63 @@ pub fn single_instance() -> Option<SingleInstance> {
     }
 }
 
+/// One `REG_SZ` / `REG_EXPAND_SZ` value, with `%VARS%` expanded.
+fn reg_string(root: windows::Win32::System::Registry::HKEY, key: &str, value: &str) -> Option<String> {
+    use windows::Win32::System::Registry::{RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ, RegGetValueW};
+    let (key, value) = (HSTRING::from(key), HSTRING::from(value));
+    let flags = RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ;
+    // SAFETY: first call asks for the size; the second writes at most that
+    // many bytes into a buffer we own of that size.
+    unsafe {
+        let mut bytes = 0u32;
+        RegGetValueW(root, &key, &value, flags, None, None, Some(&mut bytes)).ok().ok()?;
+        let mut buf = vec![0u16; (bytes as usize).div_ceil(2)];
+        RegGetValueW(root, &key, &value, flags, None, Some(buf.as_mut_ptr().cast()), Some(&mut bytes)).ok().ok()?;
+        let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        Some(String::from_utf16_lossy(&buf[..len]))
+    }
+}
+
+/// PATH as a newly started program would get it now: the machine PATH,
+/// then the user's, read from the registry. Our own environment still holds
+/// the PATH from when we started, so a folder added since (a Claude Code
+/// install) would be missed by a plain relaunch.
+pub fn fresh_path() -> Option<String> {
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+    let machine = reg_string(HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment", "Path");
+    let user = reg_string(HKEY_CURRENT_USER, "Environment", "Path");
+    let parts: Vec<String> = [machine, user].into_iter().flatten().map(|s| s.trim_matches(';').to_string()).filter(|s| !s.is_empty()).collect();
+    (!parts.is_empty()).then(|| parts.join(";"))
+}
+
+/// Starts a new instance (with a fresh PATH) that waits for this one to
+/// exit before taking over. The caller then exits.
+pub fn spawn_successor() -> std::io::Result<()> {
+    let exe = std::env::current_exe()?;
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("--after").arg(std::process::id().to_string());
+    if let Some(path) = fresh_path() {
+        cmd.env("PATH", path);
+    }
+    cmd.spawn().map(|_| ())
+}
+
+/// `--after <pid>`: waits (up to 10 s) for the instance that started us to
+/// exit, so the single-instance check doesn't find it still running.
+pub fn wait_for_predecessor() {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject};
+    let mut args = std::env::args().skip_while(|a| a != "--after").skip(1);
+    let Some(pid) = args.next().and_then(|p| p.parse::<u32>().ok()) else { return };
+    // SAFETY: the handle is checked and closed; waiting is bounded.
+    unsafe {
+        if let Ok(h) = OpenProcess(PROCESS_SYNCHRONIZE, false, pid) {
+            let _ = WaitForSingleObject(h, 10_000);
+            let _ = CloseHandle(h);
+        }
+    }
+}
+
 /// Brings the running instance's window to the front.
 pub fn activate_existing() {
     // SAFETY: FindWindowW/ShowWindow on a window we only look up by title.
@@ -278,4 +335,17 @@ pub fn default_position(size: [f32; 2]) -> Option<[f32; 2]> {
         _ => b - GAP - size[1],
     };
     Some([x, y])
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn fresh_path_comes_from_the_registry_expanded() {
+        let path = super::fresh_path().expect("a PATH in the registry");
+        let windir = std::env::var("SystemRoot").unwrap().to_lowercase();
+        // The machine PATH always holds System32, written as %SystemRoot%\…
+        // in the registry: it must arrive expanded.
+        assert!(path.to_lowercase().contains(&format!(r"{windir}\system32")), "{path}");
+        assert!(!path.contains('%'), "unexpanded variable in {path}");
+    }
 }

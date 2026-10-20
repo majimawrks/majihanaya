@@ -14,6 +14,7 @@ pub struct Ids {
     reset_position: MenuId,
     open_config: MenuId,
     autostart: MenuId,
+    restart: MenuId,
     exit: MenuId,
 }
 
@@ -28,6 +29,8 @@ pub enum Action {
     OpenConfig,
     /// The menu has already flipped the check mark; read it with `autostart_checked`.
     Autostart,
+    /// Start again, picking up PATH changes (a CLI installed since).
+    Restart,
     Exit,
 }
 
@@ -51,6 +54,7 @@ impl Tray {
         let reset_position = MenuItem::new("Reset position", true, None);
         let open_config = MenuItem::new("Open config", true, None);
         let autostart = CheckMenuItem::new("Start with Windows", true, autostart_on, None);
+        let restart = MenuItem::new("Restart", true, None);
         let exit = MenuItem::new("Exit", true, None);
         let menu = Menu::new();
         menu.append_items(&[
@@ -64,6 +68,7 @@ impl Tray {
             &open_config,
             &autostart,
             &PredefinedMenuItem::separator(),
+            &restart,
             &exit,
         ])?;
 
@@ -83,6 +88,7 @@ impl Tray {
             reset_position: reset_position.id().clone(),
             open_config: open_config.id().clone(),
             autostart: autostart.id().clone(),
+            restart: restart.id().clone(),
             exit: exit.id().clone(),
         };
         Ok(Self { icon, autostart, ids, size, shown: None, tip: String::new() })
@@ -142,6 +148,8 @@ pub fn menu_action(event: &MenuEvent, ids: &Ids) -> Option<Action> {
         Action::OpenConfig
     } else if id == &ids.autostart {
         Action::Autostart
+    } else if id == &ids.restart {
+        Action::Restart
     } else if id == &ids.exit {
         Action::Exit
     } else {
