@@ -59,12 +59,23 @@ run it. There is no installer. To start it with Windows, tick
 
 The exe is not code-signed, so SmartScreen may warn the first time you run it.
 
+If you install Claude Code or the Codex CLI while majihanaya is running, choose
+Restart in its tray menu. The installers add their folder to your PATH, and
+Restart starts majihanaya again with that new PATH so it finds the tool.
+
+At 100% the details and settings views are 615 px wide (the compact view
+274 px). To make the window bigger, use Larger in the tray menu or the Scale
+slider in Settings.
+
 ## How it gets the numbers
 
 - Claude: runs `claude -p /usage` and `claude auth status`. These use no
-  tokens. If the CLI can't answer, it can fall back to Claude Desktop's
-  `plan-usage-history.json`, but only when that file belongs to the same
-  organisation as the CLI login.
+  tokens. It uses `claude` from your PATH, or else the copy bundled with
+  Claude Desktop (which only answers once it has been logged in). If the CLI
+  can't answer, it can fall back to Claude Desktop's
+  `plan-usage-history.json`: never when that file belongs to another
+  organisation than the CLI login, and with only Claude Desktop installed,
+  marked with its age (see Requirements).
 - Codex: talks to `codex app-server` over stdio (no tokens spent). If that
   fails, it reads the newest `token_count` event from the Codex session logs.
 - Sessions: reads the `*.json` files in `~/.claude/sessions` for Claude Code.
@@ -96,6 +107,11 @@ toolchain with the MSVC target.
 
 `cargo run -- --dump` refreshes every source once and prints the result as
 JSON, which is handy when something looks wrong.
+
+Debug builds can start with made-up data for screenshots: set
+`MAJIHANAYA_DEMO=1` (or `desktop` for a Claude Desktop-only setup),
+`MAJIHANAYA_VIEW=details` or `settings` to pick the view, and
+`MAJIHANAYA_SHOT=<file>` to save one frame as raw RGBA and exit.
 
 ## License
 
