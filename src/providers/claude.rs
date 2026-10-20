@@ -225,13 +225,41 @@ fn find_claude_exe(dir: &Path, depth: u32) -> Option<PathBuf> {
         .find_map(|e| find_claude_exe(&e.path(), depth - 1))
 }
 
-fn desktop_cli() -> Option<PathBuf> {
-    let root = dirs::config_dir()?.join("Claude").join("claude-code");
-    let mut versions: Vec<_> = std::fs::read_dir(root)
-        .ok()?
+/// Subfolders of `dir` whose name passes `keep` (unreadable: none).
+fn subdirs(dir: &Path, keep: impl Fn(&str) -> bool) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    entries
         .flatten()
-        .filter(|e| e.path().is_dir())
-        .filter_map(|e| Some((semver_key(&e.file_name().to_string_lossy())?, e.path())))
+        .filter(|e| keep(&e.file_name().to_string_lossy()))
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect()
+}
+
+/// Every folder Claude Desktop may keep its data in, depending on the
+/// version and how it was installed: `%APPDATA%\Claude`, newer builds'
+/// `%LOCALAPPDATA%\Claude-Data\<package>`, and the Store package's
+/// virtualized `%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude`.
+fn desktop_roots() -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = dirs::config_dir().map(|d| d.join("Claude")).into_iter().collect();
+    if let Some(local) = dirs::data_local_dir() {
+        roots.extend(subdirs(&local.join("Claude-Data"), |_| true));
+        roots.extend(
+            subdirs(&local.join("Packages"), |n| n.to_ascii_lowercase().starts_with("claude_"))
+                .into_iter()
+                .map(|p| p.join("LocalCache").join("Roaming").join("Claude")),
+        );
+    }
+    roots.retain(|r| r.is_dir());
+    roots
+}
+
+/// The newest Desktop-bundled CLI across all Desktop data folders.
+fn desktop_cli() -> Option<PathBuf> {
+    let mut versions: Vec<_> = desktop_roots()
+        .iter()
+        .flat_map(|root| subdirs(&root.join("claude-code"), |_| true))
+        .filter_map(|p| Some((semver_key(&p.file_name()?.to_string_lossy())?, p)))
         .collect();
     versions.sort_by(|a, b| b.0.cmp(&a.0));
     versions.into_iter().find_map(|(_, p)| find_claude_exe(&p, 3))
@@ -261,10 +289,14 @@ fn probe_auth(state: &Shared, cli: &Path) -> Option<ClaudeAccount> {
     parse_auth(&out.stdout)
 }
 
+/// The newest sample across all Desktop data folders.
 fn desktop_sample() -> Option<DesktopSample> {
-    let path = dirs::config_dir()?.join("Claude").join("plan-usage-history.json");
-    // Desktop keeps a bounded history; a bigger file is not one we understand.
-    parse_desktop_history(&proc::read_text_capped(&path, 8 * 1024 * 1024).ok()?)
+    desktop_roots()
+        .iter()
+        // Desktop keeps a bounded history; a bigger file is not one we understand.
+        .filter_map(|root| proc::read_text_capped(&root.join("plan-usage-history.json"), 8 * 1024 * 1024).ok())
+        .filter_map(|text| parse_desktop_history(&text))
+        .max_by_key(|s| s.0)
 }
 
 /// One usage probe + (if due) auth status + fallback logic.
@@ -325,7 +357,9 @@ pub fn refresh(state: &Shared, config: &Config) {
                 decide_fallback(config.use_desktop_fallback, cli_fresh, sample.as_ref(), cli_org.as_deref(), now);
             let mut s = lock(state);
             let c = &mut s.claude;
-            c.presence = if cli.is_some() { Presence::Found } else { Presence::Missing };
+            // Claude Desktop's history alone is a source: show the section
+            // (with its numbers, or why there are none) instead of hiding it.
+            c.presence = if cli.is_some() || sample.is_some() { Presence::Found } else { Presence::Missing };
             c.last_attempt = Some(now);
             match decision {
                 Fallback::Use(fh, sd) => {
@@ -497,6 +531,24 @@ mod tests {
         // other org (or sample without org when CLI org is known)
         assert_eq!(decide_fallback(true, false, Some(&other), Some(org), n), Fallback::OrgMismatch);
         assert_eq!(decide_fallback(true, false, Some(&none_org), Some(org), n), Fallback::OrgMismatch);
+    }
+
+    #[test]
+    fn subdirs_filters_by_name() {
+        let d = std::env::temp_dir().join(format!("majihanaya-subdirs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        for name in ["Claude_pzs8sxrjxfjjc", "Microsoft.Other", "claude_lower"] {
+            std::fs::create_dir_all(d.join(name)).unwrap();
+        }
+        std::fs::write(d.join("Claude_file"), "").unwrap();
+        let mut found: Vec<String> = subdirs(&d, |n| n.to_ascii_lowercase().starts_with("claude_"))
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        found.sort();
+        assert_eq!(found, ["Claude_pzs8sxrjxfjjc", "claude_lower"]);
+        assert!(subdirs(&d.join("missing"), |_| true).is_empty());
+        let _ = std::fs::remove_dir_all(d);
     }
 
     #[test]
