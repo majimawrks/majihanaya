@@ -46,8 +46,10 @@ fn main() -> eframe::Result {
     let state: model::Shared = if demo { std::sync::Arc::new(std::sync::Mutex::new(demo::state())) } else { Default::default() };
     #[cfg(not(debug_assertions))]
     let state: model::Shared = Default::default();
-    // The design's compact window; resized to its content after the first frame.
-    let size = [ui::COMPACT_W, 440.0];
+    // The compact window at the app's zoom; resized to its content after the
+    // first frame.
+    let z = ui::zoom(config.scale);
+    let size = [ui::COMPACT_W * z, 440.0 * z];
     // Borderless + transparent: the app draws the design's rounded rack and
     // title bar itself, and opacity is a paint multiplier.
     let mut viewport = egui::ViewportBuilder::default()
@@ -150,7 +152,7 @@ impl App {
             RawWindowHandle::Win32(h) => Window::from_raw(h.hwnd.get()),
             _ => return Err("expected a Win32 window".into()),
         };
-        cc.egui_ctx.set_zoom_factor(config.scale);
+        cc.egui_ctx.set_zoom_factor(ui::zoom(config.scale));
         let saved_ok = config.left.zip(config.top).is_some_and(|(x, y)| platform::logical_on_screen(x, y));
         if !saved_ok {
             window.snap_to_tray_corner();
@@ -329,7 +331,7 @@ impl App {
             ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(level));
         }
         if cfg.scale != self.config.scale {
-            ctx.set_zoom_factor(cfg.scale);
+            ctx.set_zoom_factor(ui::zoom(cfg.scale));
         }
         // Keep the saved position: the panel doesn't edit it.
         let (left, top) = (self.config.left, self.config.top);
@@ -350,7 +352,7 @@ impl App {
                 let step = if matches!(action, tray::Action::Larger) { 0.1 } else { -0.1 };
                 // Rounded so repeated steps don't drift (1.0999…).
                 self.config.scale = ((self.config.scale + step) * 10.0).round().clamp(7.5, 20.0) / 10.0;
-                ctx.set_zoom_factor(self.config.scale);
+                ctx.set_zoom_factor(ui::zoom(self.config.scale));
                 self.save_config();
             }
             tray::Action::Settings => {

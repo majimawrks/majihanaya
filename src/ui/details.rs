@@ -27,6 +27,8 @@ const TRAFFIC_MIN: f32 = 172.0;
 const RIGHT_GAP: f32 = 6.0;
 
 /// Draws the details body (everything between title bar and footer).
+/// `stretch`: extra height to take on, given to the screens that flex
+/// (status, traffic), so the window matches the settings view's height.
 #[allow(clippy::too_many_arguments)]
 pub fn draw(
     ui: &mut egui::Ui,
@@ -38,6 +40,7 @@ pub fn draw(
     tz: FixedOffset,
     blink_on: bool,
     fx: &dyn Fn(&Feed) -> Fx,
+    stretch: f32,
 ) {
     let col_w = (ui.available_width() - GAP) / 2.0;
     let left_used = sections_height(wall);
@@ -47,7 +50,7 @@ pub fn draw(
     let right_fixed = sessions_h + CLOCKS_H + BEZEL + RIGHT_GAP;
     let left_base = left_used + if config.show_status { left_gap + STATUS_MIN + BEZEL } else { 0.0 };
     let right_base = right_fixed + TRAFFIC_MIN + BEZEL;
-    let total = left_base.max(right_base);
+    let total = left_base.max(right_base) + stretch.max(0.0);
 
     let (area, _) = ui.allocate_exact_size(vec2(ui.available_width(), total), egui::Sense::hover());
     let left_rect = Rect::from_min_size(area.min, vec2(col_w, total));

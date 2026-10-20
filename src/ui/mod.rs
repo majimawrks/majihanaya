@@ -24,9 +24,22 @@ use std::time::{Duration, Instant};
 use theme::{chrome, vt};
 
 pub const COMPACT_W: f32 = 320.0;
-pub const DETAILS_W: f32 = 720.0;
-/// Settings keep the design's 632: their two columns don't need more.
-pub const SETTINGS_W: f32 = 632.0;
+/// What "100%" (`scale = 1.0`) really draws at. The layout is designed in
+/// the units above; this shrinks the whole app so the wide views are 615 px
+/// at 100% Windows scaling: 45% of a 1366-wide laptop screen.
+pub const BASE_ZOOM: f32 = 615.0 / WIDE_W;
+
+/// egui's zoom for the user's `scale` setting.
+pub fn zoom(scale: f32) -> f32 {
+    scale * BASE_ZOOM
+}
+
+/// Every view other than compact (details, settings) is this wide, and as
+/// tall as the taller of them, so switching between them never resizes.
+pub const WIDE_W: f32 = 720.0;
+/// The settings view's height before it has been drawn (it never changes:
+/// its content is fixed), so details matches it from the start.
+const SETTINGS_H_GUESS: f32 = 567.5;
 const PAD: f32 = 8.0;
 const SWEEP: Duration = Duration::from_millis(400);
 const BURST_FRAMES: u32 = 3;
@@ -59,6 +72,9 @@ pub struct WindowUi {
     modes: HashMap<String, (std::mem::Discriminant<Mode>, Option<u32>)>,
     settings: Option<settings::Draft>,
     blink_epoch: Instant,
+    /// Natural (unstretched) heights of the wide views, last time drawn.
+    details_h: f32,
+    settings_h: f32,
 }
 
 impl WindowUi {
@@ -71,6 +87,8 @@ impl WindowUi {
             modes: HashMap::new(),
             settings: None,
             blink_epoch: Instant::now(),
+            details_h: 0.0,
+            settings_h: SETTINGS_H_GUESS,
         };
         // Debug builds only: start in another view, for screenshots.
         if cfg!(debug_assertions) {
@@ -96,10 +114,14 @@ impl WindowUi {
         let wall = feeds::wall(state, config, now, tz);
         let view_before = self.view;
         let mut actions = Vec::new();
-        let width = match self.view {
-            View::Compact => COMPACT_W,
-            View::Details => DETAILS_W,
-            View::Settings => SETTINGS_W,
+        let width = if self.view == View::Compact { COMPACT_W } else { WIDE_W };
+        // Wide views take on the difference to the taller one.
+        let stretch = match self.view {
+            View::Compact => 0.0,
+            // 0: not drawn yet, so its own height is unknown; no stretch.
+            View::Details if self.details_h == 0.0 => 0.0,
+            View::Details => (self.settings_h - self.details_h).max(0.0),
+            View::Settings => (self.details_h - self.settings_h).max(0.0),
         };
 
         let ctx = ui.ctx().clone();
@@ -124,10 +146,10 @@ impl WindowUi {
             self.title_bar(ui, &wall, config, &mut actions);
             match self.view {
                 View::Compact => self.compact(ui, &wall, blink_on),
-                View::Details => details::draw(ui, &self.tex, &wall, state, config, now, tz, blink_on, &|f| self_fx(&self.sweeps, &self.modes, f)),
+                View::Details => details::draw(ui, &self.tex, &wall, state, config, now, tz, blink_on, &|f| self_fx(&self.sweeps, &self.modes, f), stretch),
                 View::Settings => {
                     if let Some(draft) = &mut self.settings {
-                        match settings::draw(ui, draft) {
+                        match settings::draw(ui, draft, stretch) {
                             Some(settings::Outcome::Apply(cfg, autostart)) => {
                                 actions.push(Action::Apply(cfg, autostart));
                                 self.view = View::Compact;
@@ -144,6 +166,15 @@ impl WindowUi {
             }
         });
         let size = resp.response.rect.size();
+        // Remember this view's own height (what it is without the stretch),
+        // unless a click switched views mid-frame and this was the old one.
+        if self.view == view_before {
+            match self.view {
+                View::Details => self.details_h = size.y - stretch,
+                View::Settings => self.settings_h = size.y - stretch,
+                View::Compact => {}
+            }
+        }
 
         // A click switched views mid-frame: this frame was laid out for the
         // old one, so draw the new one right away.

@@ -325,7 +325,9 @@ fn button(ui: &mut Ui, b: Btn, x: f32, y: f32, from_left: bool) -> (Response, f3
     (r, if from_left { rect.right() } else { rect.left() })
 }
 
-pub fn draw(ui: &mut Ui, draft: &mut Draft) -> Option<Outcome> {
+/// `stretch`: extra height to take on above the footer, so the window
+/// matches the details view's height.
+pub fn draw(ui: &mut Ui, draft: &mut Draft, stretch: f32) -> Option<Outcome> {
     let mut out = None;
     let saved = draft.saved.clone();
     let autostart_saved = draft.autostart_saved;
@@ -418,6 +420,9 @@ pub fn draw(ui: &mut Ui, draft: &mut Draft) -> Option<Outcome> {
     });
 
     // ---- footer ----
+    if stretch > 0.0 {
+        ui.add_space(stretch);
+    }
     let n = draft.changes();
     let (foot, _) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::hover());
     ui.painter().hline(foot.x_range(), foot.top() + 0.5, Stroke::new(1.0, chrome::BORDER));
