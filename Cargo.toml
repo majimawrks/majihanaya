@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "Tray widget showing Claude and Codex plan-limit usage"
 license = "GPL-3.0-or-later"
-repository = "https://github.com/skeith/majihanaya"
+repository = "https://github.com/majimawrks/majihanaya"
 publish = false
 
 [dependencies]

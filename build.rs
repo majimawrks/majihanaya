@@ -45,7 +45,7 @@ BEGIN
             VALUE "OriginalFilename", "majihanaya.exe"
             VALUE "ProductName", "majihanaya"
             VALUE "ProductVersion", "{version}"
-            VALUE "Comments", "Tray widget showing Claude and Codex plan-limit usage. https://github.com/skeith/majihanaya"
+            VALUE "Comments", "Tray widget showing Claude and Codex plan-limit usage. https://github.com/majimawrks/majihanaya"
         END
     END
     BLOCK "VarFileInfo"
