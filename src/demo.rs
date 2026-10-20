@@ -58,11 +58,15 @@ pub fn state() -> AppState {
         status,
         cwd: Some(cwd.into()),
         entrypoint: entrypoint.map(Into::into),
+        tool: Tool::Claude,
     };
     s.sessions.list = vec![
         session(1, "Plan review", r"C:\work\garden-api", SessionStatus::Waiting(Some("permission".into())), None),
+        // In the order the sessions worker sorts them.
+        Session { tool: Tool::Codex, ..session(4, "Migrate the report job", r"C:\work\reports", SessionStatus::Running, Some("codex-cli")) },
         session(2, "Refactor the invoice export", r"C:\work\billing", SessionStatus::Working, None),
         session(3, "Notes cleanup", r"C:\work\notes", SessionStatus::Idle, Some("claude-desktop")),
+        Session { tool: Tool::Codex, ..session(0, "Tidy the test fixtures", r"C:\work\garden-api", SessionStatus::Idle, Some("codex-desktop")) },
     ];
     s.sessions.last_success = Some(now);
 

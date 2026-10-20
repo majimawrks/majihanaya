@@ -187,6 +187,20 @@ pub enum SessionStatus {
     Working,
     Waiting(Option<String>),
     Idle,
+    /// Codex: a turn is open. Computing, or waiting for an approval that
+    /// Codex doesn't log where we can see it.
+    Running,
+    /// Codex: no turn event to judge by.
+    Unknown,
+}
+
+/// Which tool a session belongs to.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Tool {
+    #[default]
+    Claude,
+    Codex,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -196,8 +210,9 @@ pub struct Session {
     pub name: String,
     pub status: SessionStatus,
     pub cwd: Option<String>,
-    /// e.g. "claude-desktop"; `None` for the plain CLI.
+    /// e.g. "claude-desktop", "codex-desktop"; `None` for the plain CLI.
     pub entrypoint: Option<String>,
+    pub tool: Tool,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]

@@ -5,14 +5,22 @@ use super::monitor::{self, Fx, text};
 use super::textures::Textures;
 use super::theme::{self, Phosphor, chrome, mono, vt};
 use crate::config::Config;
-use crate::model::{AppState, ServiceStatus, Session, SessionStatus, StatusLevel, UsageStats};
+use crate::model::{AppState, ServiceStatus, Session, SessionStatus, StatusLevel, Tool, UsageStats};
 use chrono::{DateTime, FixedOffset, Utc};
 use eframe::egui::{self, Align2, Color32, FontId, Painter, Rect, pos2, vec2};
 
 const GAP: f32 = 8.0;
 /// Bezel padding on both sides of a screen.
 const BEZEL: f32 = monitor::BEZEL_PAD * 2.0;
+/// CAM 04 at its smallest: room for four rows.
 const SESSIONS_H: f32 = 128.0;
+/// CAM 04 grows a row at a time up to this many rows, then summarises.
+const SESSIONS_MAX_ROWS: usize = 6;
+
+/// CAM 04's screen height for `n` sessions.
+fn sessions_height(n: usize) -> f32 {
+    SESSIONS_H + 26.0 * (n.clamp(4, SESSIONS_MAX_ROWS) - 4) as f32
+}
 const CLOCKS_H: f32 = 104.0;
 const STATUS_MIN: f32 = 62.0;
 const TRAFFIC_MIN: f32 = 172.0;
@@ -34,7 +42,8 @@ pub fn draw(
     let col_w = (ui.available_width() - GAP) / 2.0;
     let left_used = sections_height(wall);
     let left_gap = if left_used > 0.0 { GAP } else { 0.0 };
-    let sessions_h = if config.show_sessions { SESSIONS_H + BEZEL + RIGHT_GAP } else { 0.0 };
+    let sessions_screen_h = sessions_height(state.sessions.list.len());
+    let sessions_h = if config.show_sessions { sessions_screen_h + BEZEL + RIGHT_GAP } else { 0.0 };
     let right_fixed = sessions_h + CLOCKS_H + BEZEL + RIGHT_GAP;
     let left_base = left_used + if config.show_status { left_gap + STATUS_MIN + BEZEL } else { 0.0 };
     let right_base = right_fixed + TRAFFIC_MIN + BEZEL;
@@ -73,13 +82,12 @@ pub fn draw(
         if config.show_sessions {
             let waiting = state.sessions.list.iter().any(|s| matches!(s.status, SessionStatus::Waiting(_)));
             let stroke = (waiting && blink_on).then_some(chrome::AMBER);
-            let mut desktop_rows = Vec::new();
-            monitor::monitor(ui, tex, col_w, SESSIONS_H, bg, stroke, Fx::default(), |p, r| {
-                desktop_rows = sessions_screen(p, r, state, tz, blink_on);
+            let mut noted_rows = Vec::new();
+            monitor::monitor(ui, tex, col_w, sessions_screen_h, bg, stroke, Fx::default(), |p, r| {
+                noted_rows = sessions_screen(p, r, state, tz, blink_on);
             });
-            for (i, row) in desktop_rows.into_iter().enumerate() {
-                ui.interact(row, ui.scope_id().with(("desktop-session", i)), egui::Sense::hover())
-                    .on_hover_text(DESKTOP_NOTE);
+            for (i, (row, note)) in noted_rows.into_iter().enumerate() {
+                ui.interact(row, ui.scope_id().with(("session-note", i)), egui::Sense::hover()).on_hover_text(note);
             }
         }
         monitor::monitor(ui, tex, col_w, CLOCKS_H, bg, None, Fx::default(), |p, r| {
@@ -192,8 +200,19 @@ fn is_desktop(s: &Session) -> bool {
 fn session_tag(s: &Session) -> &'static str {
     match s.status {
         SessionStatus::Working => "● BUSY",
+        SessionStatus::Running => "● RUN",
         SessionStatus::Waiting(_) => "◆ WAIT",
         SessionStatus::Idle => "○ IDLE",
+        SessionStatus::Unknown => "? ----",
+    }
+}
+
+/// Which tool the session belongs to, as plain letters (not either
+/// company's logo): CC for Claude Code, CX for Codex.
+fn tool_tag(s: &Session) -> &'static str {
+    match s.tool {
+        Tool::Claude => "CC",
+        Tool::Codex => "CX",
     }
 }
 
@@ -208,13 +227,43 @@ fn session_detail(s: &Session) -> Option<String> {
 /// Hover text for a Claude Desktop row: why its title may be out of date.
 const DESKTOP_NOTE: &str = "Claude Desktop runs all of its Claude Code sessions in one process and writes a single entry for them in ~/.claude/sessions, so this row stands for every Desktop session. The title shown is the one in that entry: Desktop doesn't update it as you switch or rename conversations, so it is often stale. Sessions started from a terminal get one row each, with live titles.";
 
+/// Hover text for the Codex Desktop row.
+const CODEX_DESKTOP_NOTE: &str = "ChatGPT Desktop runs all of its Codex conversations in one process, so this row stands for all of them and shows the one written to most recently. Codex sessions started from a terminal get one row each.";
+
+/// Hover text for a Codex row whose turn is open.
+const CODEX_RUN_NOTE: &str = "RUN: a Codex turn is in progress. Approval prompts for commands show as WAIT; other kinds of approval (such as file edits) may not be visible to majihanaya and would show as RUN.";
+
+/// Hover text for a Codex row waiting on an approval.
+const CODEX_WAIT_NOTE: &str = "WAIT: Codex asked to run a command with extra permissions and it hasn't run yet, which usually means it is waiting for your approval. If Codex is set to approve such commands itself, or the command is simply slow, this shows until the command finishes.";
+
+/// Hover text for a Codex row whose state couldn't be read.
+const CODEX_UNKNOWN_NOTE: &str = "Codex's log for this session shows no turn starting or finishing, so its state is unknown.";
+
+/// What a row explains on hover, if anything.
+fn session_note(s: &Session) -> Option<String> {
+    let desktop = is_desktop(s).then_some(match s.tool {
+        Tool::Claude => DESKTOP_NOTE,
+        Tool::Codex => CODEX_DESKTOP_NOTE,
+    });
+    let status = match (&s.status, s.tool) {
+        (SessionStatus::Running, _) => Some(CODEX_RUN_NOTE),
+        (SessionStatus::Unknown, _) => Some(CODEX_UNKNOWN_NOTE),
+        (SessionStatus::Waiting(_), Tool::Codex) => Some(CODEX_WAIT_NOTE),
+        _ => None,
+    };
+    match (status, desktop) {
+        (None, None) => None,
+        (a, b) => Some([a, b].into_iter().flatten().collect::<Vec<_>>().join("\n\n")),
+    }
+}
+
 /// Marquee speed for a hovered, cut-off title, in points per second.
 const MARQUEE_SPEED: f32 = 30.0;
 /// Blank space between the end of a scrolling title and its next pass.
 const MARQUEE_GAP: f32 = 32.0;
 
-/// Draws the rows; returns the rects of Claude Desktop rows (for hover help).
-fn sessions_screen(p: &Painter, r: Rect, state: &AppState, tz: FixedOffset, blink_on: bool) -> Vec<Rect> {
+/// Draws the rows; returns the rows that explain themselves on hover.
+fn sessions_screen(p: &Painter, r: Rect, state: &AppState, tz: FixedOffset, blink_on: bool) -> Vec<(Rect, String)> {
     header(p, r, "CAM 04 · SESSIONS", &clock_of(state.sessions.last_success, tz));
     let list = &state.sessions.list;
     // Rows are 22 high, 4 apart, below the header; they may use the screen's padding.
@@ -226,23 +275,23 @@ fn sessions_screen(p: &Painter, r: Rect, state: &AppState, tz: FixedOffset, blin
     }
     let (shown, more) = if list.len() > max { (max.saturating_sub(1), list.len() - max.saturating_sub(1)) } else { (list.len(), 0) };
     let hover = p.ctx().pointer_hover_pos();
-    let mut desktop = Vec::new();
+    let mut noted = Vec::new();
     for (i, s) in list.iter().take(shown).enumerate() {
         let row = Rect::from_min_size(pos2(r.left() - 4.0, top + i as f32 * 26.0), vec2(r.width() + 8.0, 22.0));
         session_row(p, row, s, blink_on, hover.is_some_and(|h| row.contains(h)));
-        if is_desktop(s) {
-            desktop.push(row);
+        if let Some(note) = session_note(s) {
+            noted.push((row, note));
         }
     }
     if more > 0 && max > 0 {
         let y = top + shown as f32 * 26.0 + 11.0;
         text(p, pos2(r.left() + 50.0 + 8.0, y), Align2::LEFT_CENTER, &format!("+{more} MORE"), vt(16.0), theme::OK.dim, 0.0);
     }
-    desktop
+    noted
 }
 
-/// A 12×10 glyph for where the session runs: a monitor on a stand for
-/// Claude Desktop, a `>_` prompt for the CLI.
+/// A 12×10 glyph for where the session runs: a monitor on a stand for a
+/// desktop app, a `>_` prompt for the CLI.
 fn kind_glyph(p: &Painter, left: f32, mid: f32, desktop: bool, color: Color32) {
     let stroke = egui::Stroke::new(1.2, color);
     if desktop {
@@ -257,16 +306,19 @@ fn kind_glyph(p: &Painter, left: f32, mid: f32, desktop: bool, color: Color32) {
     }
 }
 
-/// Status | kind glyph · PROJECT · title | waiting reason.
+/// Status | tool tag, kind glyph · PROJECT · title | waiting reason.
 fn session_row(p: &Painter, row: Rect, s: &Session, blink_on: bool, hovered: bool) {
     let waiting = matches!(s.status, SessionStatus::Waiting(_));
     if waiting && blink_on {
         p.rect_filled(row, 3.0, Color32::from_rgba_unmultiplied(251, 191, 36, 41));
     }
     let (tag_fg, name_fg, glyph_fg) = match &s.status {
-        SessionStatus::Working => (if blink_on { chrome::REC_ON } else { chrome::REC_OFF }, chrome::INK, theme::OK.fg),
+        SessionStatus::Working | SessionStatus::Running => {
+            (if blink_on { chrome::REC_ON } else { chrome::REC_OFF }, chrome::INK, theme::OK.fg)
+        }
         SessionStatus::Waiting(_) => (chrome::AMBER, chrome::AMBER, chrome::AMBER),
         SessionStatus::Idle => (theme::OK.dim, chrome::PLATE_TEXT, theme::OK.dim),
+        SessionStatus::Unknown => (theme::NO_DATA.fg, chrome::PLATE_TEXT, theme::NO_DATA.fg),
     };
     let mid = row.center().y;
     let (x0, x1) = (row.left() + 4.0, row.right() - 4.0);
@@ -275,7 +327,8 @@ fn session_row(p: &Painter, row: Rect, s: &Session, blink_on: bool, hovered: boo
         Some(d) => text(p, pos2(x1, mid), Align2::RIGHT_CENTER, &d, vt(16.0), chrome::AMBER, 0.0).left() - 8.0,
         None => x1,
     };
-    let glyph_x = x0 + 50.0 + 8.0;
+    let tag = text(p, pos2(x0 + 50.0 + 8.0, mid), Align2::LEFT_CENTER, tool_tag(s), vt(16.0), glyph_fg, 0.0);
+    let glyph_x = tag.right() + 5.0;
     kind_glyph(p, glyph_x, mid, is_desktop(s), glyph_fg);
     let name_x = glyph_x + 12.0 + 6.0;
     // "MAJIHANAYA · Plan review": the project (the session's folder) first,
@@ -467,7 +520,7 @@ mod tests {
 
     #[test]
     fn session_columns() {
-        let s = |status, entrypoint: Option<&str>| Session { pid: 1, name: "x".into(), status, cwd: None, entrypoint: entrypoint.map(Into::into) };
+        let s = |status, entrypoint: Option<&str>| Session { pid: 1, name: "x".into(), status, cwd: None, entrypoint: entrypoint.map(Into::into), tool: Tool::Claude };
         // Left: always the status; right: only what a waiting session waits for.
         assert_eq!(session_tag(&s(SessionStatus::Working, None)), "● BUSY");
         assert_eq!(session_tag(&s(SessionStatus::Idle, Some("claude-desktop"))), "○ IDLE");
@@ -478,11 +531,35 @@ mod tests {
         assert_eq!(session_detail(&s(SessionStatus::Working, None)), None);
         assert!(is_desktop(&s(SessionStatus::Idle, Some("claude-desktop"))));
         assert!(!is_desktop(&s(SessionStatus::Idle, None)));
+        assert_eq!(session_tag(&s(SessionStatus::Running, None)), "● RUN");
+        assert_eq!(session_tag(&s(SessionStatus::Unknown, None)), "? ----");
+    }
+
+    #[test]
+    fn sessions_screen_grows_to_six_rows() {
+        assert_eq!(sessions_height(0), SESSIONS_H);
+        assert_eq!(sessions_height(4), SESSIONS_H);
+        assert_eq!(sessions_height(5), SESSIONS_H + 26.0);
+        assert_eq!(sessions_height(6), SESSIONS_H + 52.0);
+        assert_eq!(sessions_height(40), SESSIONS_H + 52.0);
+    }
+
+    #[test]
+    fn codex_rows_explain_themselves() {
+        let s = |status, tool, entrypoint: Option<&str>| Session { pid: 1, name: "x".into(), status, cwd: None, entrypoint: entrypoint.map(Into::into), tool };
+        assert_eq!(tool_tag(&s(SessionStatus::Idle, Tool::Claude, None)), "CC");
+        assert_eq!(tool_tag(&s(SessionStatus::Idle, Tool::Codex, None)), "CX");
+        assert_eq!(session_note(&s(SessionStatus::Idle, Tool::Codex, Some("codex-cli"))), None);
+        assert_eq!(session_note(&s(SessionStatus::Idle, Tool::Codex, Some("codex-desktop"))).as_deref(), Some(CODEX_DESKTOP_NOTE));
+        assert_eq!(session_note(&s(SessionStatus::Idle, Tool::Claude, Some("claude-desktop"))).as_deref(), Some(DESKTOP_NOTE));
+        let run_desktop = session_note(&s(SessionStatus::Running, Tool::Codex, Some("codex-desktop"))).unwrap();
+        assert!(run_desktop.starts_with(CODEX_RUN_NOTE) && run_desktop.ends_with(CODEX_DESKTOP_NOTE));
+        assert_eq!(session_note(&s(SessionStatus::Working, Tool::Claude, None)), None);
     }
 
     #[test]
     fn project_from_cwd() {
-        let s = |cwd: Option<&str>| Session { pid: 1, name: "Plan review".into(), status: SessionStatus::Idle, cwd: cwd.map(Into::into), entrypoint: None };
+        let s = |cwd: Option<&str>| Session { pid: 1, name: "Plan review".into(), status: SessionStatus::Idle, cwd: cwd.map(Into::into), entrypoint: None, tool: Tool::Claude };
         assert_eq!(project_of(&s(Some(r"C:\Users\me\Lab\majihanaya"))), "majihanaya");
         assert_eq!(project_of(&s(Some(r"C:\Users\me\Lab\majihanaya\"))), "majihanaya");
         assert_eq!(project_of(&s(None)), "Plan review");

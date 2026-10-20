@@ -1,8 +1,8 @@
 # majihanaya
 
 A small Windows tray app that shows how much of your Claude and Codex plan
-limits you have used, when each window resets, and which Claude Code sessions
-are busy or waiting for you.
+limits you have used, when each window resets, and which Claude Code and Codex
+sessions are busy or waiting for you.
 
 The tray icon shows one number: by default the highest percentage among the
 current usage windows, coloured green, amber or red against your thresholds.
@@ -21,9 +21,12 @@ The screenshots use made-up accounts and sessions.
 - Claude: the 5-hour session, the weekly limit and any per-model weekly
   limits, with reset times, plus the 24h / 7d request stats from `/usage`.
 - Codex: every rate-limit window the Codex app-server reports.
-- Sessions: Claude Code sessions running on this PC, and whether each is busy,
-  idle or waiting (for example for a permission prompt). Claude Desktop runs
-  all its sessions in one process, so it appears as one row.
+- Sessions: Claude Code (CC) and Codex (CX) sessions running on this PC, and
+  whether each is busy, idle or waiting for a permission prompt. Claude
+  Desktop and ChatGPT Desktop each run all their sessions in one process, so
+  each appears as one row showing its most recent session. Codex status is
+  read from its session logs and is best effort: hover a Codex row for what
+  its status can and can't tell.
 - Service status for Claude and for the Codex parts of the OpenAI status page.
 - The installed Claude Code version and whether a newer one is out.
 
@@ -64,7 +67,11 @@ The exe is not code-signed, so SmartScreen may warn the first time you run it.
   organisation as the CLI login.
 - Codex: talks to `codex app-server` over stdio (no tokens spent). If that
   fails, it reads the newest `token_count` event from the Codex session logs.
-- Sessions: reads the `*.json` files in `~/.claude/sessions`.
+- Sessions: reads the `*.json` files in `~/.claude/sessions` for Claude Code.
+  For Codex, it finds running `codex.exe` processes and looks in the matching
+  session log for the folder, when turns start and end, and whether a command
+  is waiting for extra permissions. Your prompts, commands and Codex's replies
+  are never kept or shown.
 
 It never reads credential files or tokens. The only network requests are to
 the Claude and OpenAI status pages and to Anthropic's Claude Code release

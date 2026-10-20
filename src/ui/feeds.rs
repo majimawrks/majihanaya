@@ -358,7 +358,7 @@ pub fn wall(state: &AppState, config: &Config, now: DateTime<Utc>, tz: FixedOffs
     let footer = Footer {
         status,
         sessions: config.show_sessions.then_some(list.len()),
-        busy: list.iter().filter(|s| s.status == SessionStatus::Working).count(),
+        busy: list.iter().filter(|s| matches!(s.status, SessionStatus::Working | SessionStatus::Running)).count(),
         waiting: list.iter().filter(|s| matches!(s.status, SessionStatus::Waiting(_))).count(),
     };
     let powered = state.claude.last_success.is_some() || state.codex.last_success.is_some();
@@ -464,9 +464,9 @@ mod tests {
         let mut s = live();
         s.codex.presence = Presence::Missing;
         s.sessions.list = vec![
-            Session { pid: 1, name: "a".into(), status: SessionStatus::Working, cwd: None, entrypoint: None },
-            Session { pid: 2, name: "b".into(), status: SessionStatus::Waiting(None), cwd: None, entrypoint: None },
-            Session { pid: 3, name: "c".into(), status: SessionStatus::Idle, cwd: None, entrypoint: None },
+            Session { pid: 1, name: "a".into(), status: SessionStatus::Working, cwd: None, entrypoint: None, tool: Tool::Claude },
+            Session { pid: 2, name: "b".into(), status: SessionStatus::Waiting(None), cwd: None, entrypoint: None, tool: Tool::Claude },
+            Session { pid: 3, name: "c".into(), status: SessionStatus::Idle, cwd: None, entrypoint: None, tool: Tool::Claude },
         ];
         let w = wall(&s, &Config::default(), now(), jkt());
         assert_eq!(w.sections.len(), 1);

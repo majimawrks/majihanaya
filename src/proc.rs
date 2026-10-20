@@ -161,6 +161,74 @@ fn find_in(path: &std::ffi::OsStr, name: &str) -> Option<PathBuf> {
     None
 }
 
+/// One running process, from a Toolhelp snapshot.
+pub struct ProcInfo {
+    pub pid: u32,
+    pub parent: u32,
+    /// Executable file name, e.g. "codex.exe".
+    pub name: String,
+}
+
+/// Every running process (empty if the snapshot fails).
+pub fn processes() -> Vec<ProcInfo> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
+    };
+    let mut out = Vec::new();
+    // SAFETY: the snapshot handle is checked and closed; each entry is a
+    // plain struct with its size set as the API requires.
+    unsafe {
+        let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else { return out };
+        let mut e = PROCESSENTRY32W { dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
+        let mut ok = Process32FirstW(snap, &mut e).is_ok();
+        while ok {
+            let len = e.szExeFile.iter().position(|&c| c == 0).unwrap_or(e.szExeFile.len());
+            out.push(ProcInfo {
+                pid: e.th32ProcessID,
+                parent: e.th32ParentProcessID,
+                name: String::from_utf16_lossy(&e.szExeFile[..len]),
+            });
+            ok = Process32NextW(snap, &mut e).is_ok();
+        }
+        let _ = CloseHandle(snap);
+    }
+    out
+}
+
+/// A process's command line, or `None` if it is gone or not ours to read.
+pub fn command_line(pid: u32) -> Option<String> {
+    use windows::Wdk::System::Threading::{NtQueryInformationProcess, ProcessCommandLineInformation};
+    use windows::Win32::Foundation::{CloseHandle, UNICODE_STRING};
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    // SAFETY: the handle is checked and closed. The first query only reports
+    // the size; the second fills a buffer of that size (u64s for alignment),
+    // which starts with a UNICODE_STRING pointing into the same buffer.
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut len = 0u32;
+        let _ = NtQueryInformationProcess(handle, ProcessCommandLineInformation, std::ptr::null_mut(), 0, &mut len);
+        let mut buf = vec![0u64; (len as usize).div_ceil(8).max(2)];
+        let status = NtQueryInformationProcess(
+            handle,
+            ProcessCommandLineInformation,
+            buf.as_mut_ptr().cast(),
+            (buf.len() * 8) as u32,
+            &mut len,
+        );
+        let _ = CloseHandle(handle);
+        if status.is_err() {
+            return None;
+        }
+        let us = &*(buf.as_ptr() as *const UNICODE_STRING);
+        if us.Buffer.is_null() {
+            return None;
+        }
+        let chars = std::slice::from_raw_parts(us.Buffer.0, us.Length as usize / 2);
+        Some(String::from_utf16_lossy(chars))
+    }
+}
+
 /// Process creation time as a FILETIME (100 ns ticks since 1601, UTC), or
 /// `None` if the process is gone or not ours to query.
 pub fn process_start_filetime(pid: u32) -> Option<u64> {
@@ -219,6 +287,18 @@ mod tests {
         assert_eq!(find_in(&path, "majihanaya-planted"), None);
         assert_eq!(find_in(&path, "tool"), Some(real.join("tool.cmd")));
         let _ = (fs::remove_file(planted), fs::remove_dir_all(real));
+    }
+
+    #[test]
+    fn own_process_is_listed_with_its_command_line() {
+        let me = std::process::id();
+        let procs = processes();
+        let p = procs.iter().find(|p| p.pid == me).expect("own pid in snapshot");
+        assert!(p.name.to_lowercase().ends_with(".exe"), "{}", p.name);
+        let cmd = command_line(me).expect("own command line");
+        let exe = env::current_exe().unwrap();
+        let stem = exe.file_stem().unwrap().to_string_lossy();
+        assert!(cmd.contains(stem.as_ref()), "{cmd}");
     }
 
     #[test]

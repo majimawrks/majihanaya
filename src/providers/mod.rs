@@ -6,6 +6,7 @@
 pub mod claude;
 pub mod codex;
 mod codex_log;
+pub mod codex_sessions;
 pub mod sessions;
 pub mod status;
 pub mod version;

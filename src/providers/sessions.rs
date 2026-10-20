@@ -76,14 +76,16 @@ fn to_session(raw: &RawSession) -> Session {
         status,
         cwd: raw.cwd.clone(),
         entrypoint: raw.entrypoint.clone(),
+        tool: Tool::Claude,
     }
 }
 
 fn rank(s: &SessionStatus) -> u8 {
     match s {
         SessionStatus::Waiting(_) => 0,
-        SessionStatus::Working => 1,
+        SessionStatus::Working | SessionStatus::Running => 1,
         SessionStatus::Idle => 2,
+        SessionStatus::Unknown => 3,
     }
 }
 
@@ -102,15 +104,15 @@ fn sessions_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".claude").join("sessions"))
 }
 
-/// `None` when the folder exists but can't be read: keep the previous list.
-fn read_all(state: &Shared) -> Option<Vec<Session>> {
+/// Claude Code sessions, unsorted. `None` when the folder exists but can't
+/// be read: keep the previous list.
+fn read_all(own: &std::collections::HashSet<u32>) -> Option<Vec<Session>> {
     let Some(dir) = sessions_dir() else { return Some(Vec::new()) };
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(Vec::new()),
         Err(_) => return None,
     };
-    let own = lock(state).own_pids.clone();
     let mut list: Vec<Session> = Vec::new();
     // Far more files than sessions anyone runs: a flooded folder costs a
     // bounded amount of work and memory.
@@ -132,12 +134,14 @@ fn read_all(state: &Shared) -> Option<Vec<Session>> {
             }
         }
     }
-    sort_sessions(&mut list);
     Some(list)
 }
 
 pub fn refresh(state: &Shared, _config: &Config) {
-    if let Some(list) = read_all(state) {
+    let own = lock(state).own_pids.clone();
+    if let Some(mut list) = read_all(&own) {
+        list.extend(super::codex_sessions::sessions(&own));
+        sort_sessions(&mut list);
         lock(state).sessions = SessionsState { list, last_success: Some(Utc::now()) };
     }
 }

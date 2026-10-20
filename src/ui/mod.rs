@@ -24,7 +24,9 @@ use std::time::{Duration, Instant};
 use theme::{chrome, vt};
 
 pub const COMPACT_W: f32 = 320.0;
-pub const DETAILS_W: f32 = 632.0;
+pub const DETAILS_W: f32 = 720.0;
+/// Settings keep the design's 632: their two columns don't need more.
+pub const SETTINGS_W: f32 = 632.0;
 const PAD: f32 = 8.0;
 const SWEEP: Duration = Duration::from_millis(400);
 const BURST_FRAMES: u32 = 3;
@@ -94,7 +96,11 @@ impl WindowUi {
         let wall = feeds::wall(state, config, now, tz);
         let view_before = self.view;
         let mut actions = Vec::new();
-        let width = if self.view == View::Compact { COMPACT_W } else { DETAILS_W };
+        let width = match self.view {
+            View::Compact => COMPACT_W,
+            View::Details => DETAILS_W,
+            View::Settings => SETTINGS_W,
+        };
 
         let ctx = ui.ctx().clone();
         let blink_on = (self.blink_epoch.elapsed().as_secs() % 2) == 0;
