@@ -274,7 +274,12 @@ impl WindowUi {
         let mut x = r.left() + 4.0;
         if self.view == View::Details {
             let v = &state.version;
-            if let Some(local) = &v.local {
+            if state.claude.desktop_only {
+                // The version found is Claude Desktop's bundled copy, which
+                // the user didn't install and Desktop updates itself: showing
+                // it (or "update available") would contradict the notice.
+                text(p, pos2(x, mid), Align2::LEFT_CENTER, "CLAUDE CODE NOT INSTALLED", vt(17.0), chrome::AMBER, 1.0);
+            } else if let Some(local) = &v.local {
                 let lr = text(p, pos2(x, mid), Align2::LEFT_CENTER, &format!("CLAUDE CODE {local}"), vt(17.0), chrome::PLATE_TEXT, 1.0);
                 x = lr.right() + 8.0;
                 if let Some(latest) = v.latest.as_ref().filter(|l| *l != local) {
