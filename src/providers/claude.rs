@@ -18,8 +18,14 @@ use std::time::Duration;
 const USAGE_ARGS: [&str; 5] = ["-p", "/usage", "--output-format", "text", "--no-session-persistence"];
 const USAGE_TIMEOUT: Duration = Duration::from_secs(30);
 const AUTH_TIMEOUT: Duration = Duration::from_secs(20);
-/// A Desktop sample older than this is not trusted.
+/// A Desktop sample older than this is not used while Claude Code works.
 const DESKTOP_MAX_AGE_SECS: i64 = 10 * 60;
+/// Desktop-only setups have nothing better, and Desktop writes samples
+/// only now and then: older samples are shown (marked by their age, never
+/// driving the tray) up to this age.
+const DESKTOP_ONLY_MAX_AGE_SECS: i64 = 24 * 3600;
+/// The 5-hour window has reset since a sample this old: its % is dropped.
+const SESSION_WINDOW_SECS: i64 = 5 * 3600;
 
 /// Unix seconds of the last `auth status` attempt (0 = never).
 static LAST_AUTH_ATTEMPT: AtomicI64 = AtomicI64::new(0);
@@ -179,12 +185,14 @@ pub enum Fallback {
     OrgMismatch,
 }
 
-/// Pure fallback policy. `cli_fresh`: the CLI answered within the stale window.
+/// Pure fallback policy. `cli_fresh`: the CLI answered within the stale
+/// window. `max_age_secs`: oldest sample accepted.
 pub fn decide_fallback(
     enabled: bool,
     cli_fresh: bool,
     sample: Option<&DesktopSample>,
     cli_org: Option<&str>,
+    max_age_secs: i64,
     now: DateTime<Utc>,
 ) -> Fallback {
     if !enabled || cli_fresh {
@@ -192,7 +200,7 @@ pub fn decide_fallback(
     }
     let Some((t, org, fh, sd)) = sample else { return Fallback::No };
     let age = (now - *t).num_seconds();
-    if !(-60..DESKTOP_MAX_AGE_SECS).contains(&age) {
+    if !(-60..max_age_secs).contains(&age) {
         return Fallback::No;
     }
     if let Some(cli_org) = cli_org {
@@ -267,7 +275,13 @@ fn desktop_cli() -> Option<PathBuf> {
 
 /// `claude` on PATH, else the newest Desktop-bundled CLI.
 pub fn resolve_cli() -> Option<PathBuf> {
-    proc::find_on_path("claude").or_else(desktop_cli)
+    resolve_cli_kind().map(|(p, _)| p)
+}
+
+/// `resolve_cli`, and whether the CLI is Desktop's bundled copy (which has
+/// no login of its own unless the user gave it one).
+fn resolve_cli_kind() -> Option<(PathBuf, bool)> {
+    proc::find_on_path("claude").map(|p| (p, false)).or_else(|| desktop_cli().map(|p| (p, true)))
 }
 
 // --------------------------------------------------------------- refresh
@@ -303,7 +317,10 @@ fn desktop_sample() -> Option<DesktopSample> {
 pub fn refresh(state: &Shared, config: &Config) {
     let now = Utc::now();
     let usage_interval = Duration::from_secs(config.usage_interval_seconds);
-    let cli = resolve_cli();
+    let (cli, bundled) = match resolve_cli_kind() {
+        Some((p, b)) => (Some(p), b),
+        None => (None, false),
+    };
 
     // Auth first, so the org is known for the fallback check.
     if let Some(cli) = &cli {
@@ -339,32 +356,48 @@ pub fn refresh(state: &Shared, config: &Config) {
             c.limits = limits;
             c.source = ClaudeSource::Cli;
             c.org_mismatch = false;
+            c.desktop_only = false;
             c.last_attempt = Some(now);
             c.last_success = Some(now);
             c.error = None;
         }
         Err(err) => {
-            let (cli_fresh, cli_org) = {
+            let (cli_fresh, cli_org, logged_in) = {
                 let s = lock(state);
                 let c = &s.claude;
                 (
                     c.source == ClaudeSource::Cli && !is_stale(c.last_success, usage_interval, now),
                     c.account.as_ref().and_then(|a| a.org_id.clone()),
+                    c.account.as_ref().is_some_and(|a| a.logged_in),
                 )
             };
+            // No logged-in Claude Code, only Claude Desktop: its history is
+            // all there is, so older samples are shown rather than nothing.
+            let desktop_only = (cli.is_none() || bundled) && !logged_in && !desktop_roots().is_empty();
+            let max_age = if desktop_only { DESKTOP_ONLY_MAX_AGE_SECS } else { DESKTOP_MAX_AGE_SECS };
             let sample = if config.use_desktop_fallback && !cli_fresh { desktop_sample() } else { None };
-            let decision =
-                decide_fallback(config.use_desktop_fallback, cli_fresh, sample.as_ref(), cli_org.as_deref(), now);
+            let decision = decide_fallback(
+                config.use_desktop_fallback,
+                cli_fresh,
+                sample.as_ref(),
+                cli_org.as_deref(),
+                max_age,
+                now,
+            );
             let mut s = lock(state);
             let c = &mut s.claude;
-            // Claude Desktop's history alone is a source: show the section
-            // (with its numbers, or why there are none) instead of hiding it.
-            c.presence = if cli.is_some() || sample.is_some() { Presence::Found } else { Presence::Missing };
+            // Claude Desktop alone is a source: show the section (with its
+            // numbers, or why there are none) instead of hiding it.
+            c.presence = if cli.is_some() || sample.is_some() || desktop_only { Presence::Found } else { Presence::Missing };
+            c.desktop_only = desktop_only;
             c.last_attempt = Some(now);
+            // The bundled CLI's "not logged in" output is not the error to show.
+            let err = if desktop_only { "needs Claude Code".to_string() } else { err };
             match decision {
                 Fallback::Use(fh, sd) => {
+                    let age = sample.as_ref().map_or(0, |s| (now - s.0).num_seconds());
                     c.limits = ClaudeLimits {
-                        session: Some(Limit { percent: fh, resets_at: None }),
+                        session: (age < SESSION_WINDOW_SECS).then_some(Limit { percent: fh, resets_at: None }),
                         week: Some(Limit { percent: sd, resets_at: None }),
                         ..Default::default()
                     };
@@ -519,18 +552,22 @@ mod tests {
         let other = (n - ChronoDuration::minutes(2), Some("org-b".to_string()), 15, 9);
         let none_org = (n - ChronoDuration::minutes(2), None, 15, 9);
         // CLI fresh wins
-        assert_eq!(decide_fallback(true, true, Some(&fresh), Some(org), n), Fallback::No);
+        assert_eq!(decide_fallback(true, true, Some(&fresh), Some(org), DESKTOP_MAX_AGE_SECS, n), Fallback::No);
         // disabled
-        assert_eq!(decide_fallback(false, false, Some(&fresh), Some(org), n), Fallback::No);
+        assert_eq!(decide_fallback(false, false, Some(&fresh), Some(org), DESKTOP_MAX_AGE_SECS, n), Fallback::No);
         // usable
-        assert_eq!(decide_fallback(true, false, Some(&fresh), Some(org), n), Fallback::Use(15, 9));
-        assert_eq!(decide_fallback(true, false, Some(&fresh), None, n), Fallback::Use(15, 9));
+        assert_eq!(decide_fallback(true, false, Some(&fresh), Some(org), DESKTOP_MAX_AGE_SECS, n), Fallback::Use(15, 9));
+        assert_eq!(decide_fallback(true, false, Some(&fresh), None, DESKTOP_MAX_AGE_SECS, n), Fallback::Use(15, 9));
         // too old / missing
-        assert_eq!(decide_fallback(true, false, Some(&old), Some(org), n), Fallback::No);
-        assert_eq!(decide_fallback(true, false, None, Some(org), n), Fallback::No);
+        assert_eq!(decide_fallback(true, false, Some(&old), Some(org), DESKTOP_MAX_AGE_SECS, n), Fallback::No);
+        assert_eq!(decide_fallback(true, false, None, Some(org), DESKTOP_MAX_AGE_SECS, n), Fallback::No);
+        // Desktop-only setups accept older samples
+        assert_eq!(decide_fallback(true, false, Some(&old), Some(org), DESKTOP_ONLY_MAX_AGE_SECS, n), Fallback::Use(15, 9));
+        let day_old = (n - ChronoDuration::hours(25), Some(org.to_string()), 15, 9);
+        assert_eq!(decide_fallback(true, false, Some(&day_old), None, DESKTOP_ONLY_MAX_AGE_SECS, n), Fallback::No);
         // other org (or sample without org when CLI org is known)
-        assert_eq!(decide_fallback(true, false, Some(&other), Some(org), n), Fallback::OrgMismatch);
-        assert_eq!(decide_fallback(true, false, Some(&none_org), Some(org), n), Fallback::OrgMismatch);
+        assert_eq!(decide_fallback(true, false, Some(&other), Some(org), DESKTOP_MAX_AGE_SECS, n), Fallback::OrgMismatch);
+        assert_eq!(decide_fallback(true, false, Some(&none_org), Some(org), DESKTOP_MAX_AGE_SECS, n), Fallback::OrgMismatch);
     }
 
     #[test]

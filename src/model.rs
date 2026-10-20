@@ -114,6 +114,11 @@ pub struct ClaudeState {
     /// Desktop history belongs to a different org than the CLI account:
     /// show a warning instead of numbers.
     pub org_mismatch: bool,
+    /// Claude Desktop is here but no logged-in Claude Code is (none on
+    /// PATH, and Desktop's bundled one has no login of its own): only
+    /// Desktop's occasional history is available, and the user is told
+    /// that full usage needs Claude Code.
+    pub desktop_only: bool,
     pub last_success: Option<DateTime<Utc>>,
     pub last_attempt: Option<DateTime<Utc>>,
     pub error: Option<String>,

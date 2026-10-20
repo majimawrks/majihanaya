@@ -110,7 +110,9 @@ pub fn view(state: &AppState, config: &Config, now: DateTime<Utc>) -> View {
                 push(claude_short(name), l, false, false);
             }
         }
-        if c.account.as_ref().is_some_and(|a| !a.logged_in) {
+        if c.desktop_only {
+            notices.push("Claude: full usage needs Claude Code".into());
+        } else if c.account.as_ref().is_some_and(|a| !a.logged_in) {
             notices.push("Claude: not logged in".into());
         }
     }

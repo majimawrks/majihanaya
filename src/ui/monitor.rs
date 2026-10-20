@@ -208,11 +208,22 @@ pub fn plate(ui: &mut egui::Ui, width: f32, left: &str, right: &str, right_color
 }
 
 /// Amber notice strip: "▲ not logged in · run claude auth login".
+/// Height of a notice: 22 for one line, +15 per further line (`\n`).
+pub fn notice_height(msg: &str) -> f32 {
+    22.0 + 15.0 * msg.lines().count().saturating_sub(1) as f32
+}
+
+/// Amber notice box. The first line is the message; further lines (after
+/// `\n`) are detail, in a quieter colour.
 pub fn notice(ui: &mut egui::Ui, width: f32, msg: &str) {
-    let (r, _) = ui.allocate_exact_size(vec2(width, 22.0), egui::Sense::hover());
+    let (r, _) = ui.allocate_exact_size(vec2(width, notice_height(msg)), egui::Sense::hover());
     let p = ui.painter();
     p.rect_filled(r, 4.0, chrome::NOTICE_BG);
     p.rect_stroke(r, 4.0, Stroke::new(1.0, chrome::NOTICE_BORDER), StrokeKind::Inside);
-    let tr = text(p, pos2(r.left() + 8.0, r.center().y), Align2::LEFT_CENTER, "▲", vt(16.0), chrome::AMBER, 0.0);
-    text(p, pos2(tr.right() + 6.0, r.center().y), Align2::LEFT_CENTER, msg, theme::mono(11.0), chrome::AMBER, 0.0);
+    let y0 = r.top() + 11.0;
+    let tr = text(p, pos2(r.left() + 8.0, y0), Align2::LEFT_CENTER, "▲", vt(16.0), chrome::AMBER, 0.0);
+    for (i, line) in msg.lines().enumerate() {
+        let color = if i == 0 { chrome::AMBER } else { chrome::PLATE_TEXT };
+        text(p, pos2(tr.right() + 6.0, y0 + 15.0 * i as f32), Align2::LEFT_CENTER, line, theme::mono(11.0), color, 0.0);
+    }
 }

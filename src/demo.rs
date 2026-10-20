@@ -69,6 +69,18 @@ pub fn state() -> AppState {
     for st in [&mut s.claude_status, &mut s.codex_status] {
         *st = ServiceStatus { level: StatusLevel::Green, text: String::new(), last_success: Some(now), error: None };
     }
+    // `MAJIHANAYA_DEMO=desktop`: only Claude Desktop, its last sample 22 h old.
+    if std::env::var("MAJIHANAYA_DEMO").as_deref() == Ok("desktop") {
+        let c = &mut s.claude;
+        c.desktop_only = true;
+        c.source = ClaudeSource::Desktop;
+        c.last_success = Some(now - Duration::hours(22));
+        if let Some(a) = c.account.as_mut() {
+            a.logged_in = false;
+        }
+        c.limits = ClaudeLimits { week: Some(Limit { percent: 41, resets_at: None }), ..Default::default() };
+        s.sessions.list.clear();
+    }
     s.version = VersionState {
         local: Some("2.1.302".into()),
         latest: Some("2.1.302".into()),

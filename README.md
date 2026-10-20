@@ -33,8 +33,19 @@ its screen says so and the tray icon stops using it.
 ## Requirements
 
 - Windows 10 or 11 (64-bit).
-- Claude Code and/or the Codex CLI, installed and logged in. A tool that isn't
-  installed is simply left out.
+- For Claude usage: [Claude Code](https://docs.claude.com/en/docs/claude-code)
+  installed and logged in (`claude auth login`).
+- For Codex usage: the [Codex CLI](https://github.com/openai/codex) installed
+  and logged in.
+
+A tool that isn't installed is left out. The desktop apps on their own
+(Claude Desktop, ChatGPT Desktop) are not enough: majihanaya reads usage
+through the command-line tools, and never through the apps' own logins.
+
+With only Claude Desktop installed, majihanaya shows the last numbers Claude
+Desktop saved to disk, marked with how old they are, and says that full usage
+needs Claude Code. Desktop saves those numbers only now and then, so they are
+often hours old, and they have no reset times or stats.
 
 ## Install
 

@@ -213,7 +213,12 @@ fn base(
             None => Mode::Acquiring,
         }
     } else if is_stale(last_success, Duration::from_secs(interval), ctx.now) {
-        Mode::Stale { frozen_at: clock(last_success, ctx.tz) }
+        // Older than most of a day: say which day, not just the time.
+        let frozen_at = match last_success {
+            Some(t) if ctx.now - t > chrono::Duration::hours(20) => t.with_timezone(&ctx.tz).format("%a %H:%M").to_string().to_uppercase(),
+            _ => clock(last_success, ctx.tz),
+        };
+        Mode::Stale { frozen_at }
     } else if aux {
         Mode::Aux
     } else {
@@ -222,21 +227,28 @@ fn base(
     Base { mode, last_success, source }
 }
 
+/// The Desktop-only notice: what's missing first, then what is shown.
+pub const DESKTOP_ONLY_NOTICE: &str = "Full usage needs Claude Code installed";
+
 fn claude_section(c: &ClaudeState, ctx: &Ctx) -> Section {
-    let logged_out = c.account.as_ref().is_some_and(|a| !a.logged_in);
+    let logged_out = c.account.as_ref().is_some_and(|a| !a.logged_in) && !c.desktop_only;
     let plan = match (&c.account, logged_out) {
+        _ if c.desktop_only => "DESKTOP ONLY".to_string(),
         (_, true) => "LOGGED OUT".to_string(),
         (Some(a), false) => a.subscription_type.clone().unwrap_or_else(|| "--".into()).to_uppercase(),
         (None, false) => "--".into(),
     };
-    let notice = if logged_out {
+    let has_data = c.source != ClaudeSource::None && (c.limits.session.is_some() || c.limits.week.is_some());
+    let notice = if c.desktop_only {
+        let detail = if has_data { "showing Claude Desktop's last numbers" } else { "Claude Desktop has no recent numbers" };
+        Some(format!("{DESKTOP_ONLY_NOTICE}\n{detail}"))
+    } else if logged_out {
         Some("not logged in · run claude auth login".into())
     } else if c.org_mismatch {
         Some("Desktop history is another account · ignored".into())
     } else {
         None
     };
-    let has_data = c.source != ClaudeSource::None && (c.limits.session.is_some() || c.limits.week.is_some());
     let b = base(
         "claude",
         has_data,
@@ -264,7 +276,7 @@ fn claude_section(c: &ClaudeState, ctx: &Ctx) -> Section {
     Section {
         name: "CLAUDE",
         plan,
-        plan_color: if logged_out { theme::chrome::AMBER } else { theme::chrome::MUTED },
+        plan_color: if logged_out || c.desktop_only { theme::chrome::AMBER } else { theme::chrome::MUTED },
         email: c.account.as_ref().and_then(|a| a.email.clone()),
         notice,
         feeds: vec![five, week],
@@ -459,6 +471,31 @@ mod tests {
         let w = wall(&s, &Config::default(), now(), jkt());
         assert_eq!(w.sections.len(), 1);
         assert_eq!((w.footer.sessions, w.footer.busy, w.footer.waiting), (Some(3), 1, 1));
+    }
+
+    #[test]
+    fn desktop_only_notice_and_old_sample() {
+        let mut s = live();
+        s.claude.desktop_only = true;
+        s.claude.source = ClaudeSource::Desktop;
+        s.claude.account.as_mut().unwrap().logged_in = false;
+        s.claude.last_success = Some(now() - chrono::Duration::hours(22));
+        s.claude.limits = ClaudeLimits { week: Some(Limit { percent: 41, resets_at: None }), ..Default::default() };
+        let w = wall(&s, &Config::default(), now(), jkt());
+        let c = &w.sections[0];
+        assert_eq!(c.plan, "DESKTOP ONLY");
+        let n = c.notice.as_deref().unwrap();
+        assert!(n.starts_with(DESKTOP_ONLY_NOTICE) && n.contains("last numbers"), "{n}");
+        // A day-old sample shows its day, and the week still shows its %.
+        assert_eq!(c.feeds[1].mode, Mode::Stale { frozen_at: "FRI 13:42".into() });
+        assert_eq!(c.feeds[1].percent, Some(41.0));
+
+        s.claude.source = ClaudeSource::None;
+        s.claude.limits = ClaudeLimits::default();
+        s.claude.error = Some("needs Claude Code".into());
+        let w = wall(&s, &Config::default(), now(), jkt());
+        assert!(w.sections[0].notice.as_deref().unwrap().contains("no recent numbers"));
+        assert!(matches!(w.sections[0].feeds[0].mode, Mode::Lost { .. }));
     }
 
     #[test]

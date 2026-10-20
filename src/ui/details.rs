@@ -99,8 +99,8 @@ fn sections_height(wall: &Wall) -> f32 {
         .iter()
         .map(|s| {
             let mut items = vec![18.0];
-            if s.notice.is_some() {
-                items.push(22.0);
+            if let Some(n) = &s.notice {
+                items.push(monitor::notice_height(n));
             }
             items.extend(s.feeds.iter().map(|f| f.screen_height() + BEZEL));
             items.iter().sum::<f32>() + 6.0 * (items.len() - 1) as f32
