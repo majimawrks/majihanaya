@@ -251,21 +251,40 @@ impl App {
         if mtime.is_none() || mtime == self.config_mtime {
             return;
         }
-        // Unreadable right now (an editor holding it): try again next time.
-        let Some(text) = config::path().and_then(|p| std::fs::read_to_string(p).ok()) else { return };
+        let text = match config::path().map(|p| proc::read_text_capped(&p, config::MAX_BYTES)) {
+            Some(Ok(text)) => text,
+            // Too large or not UTF-8: invalid, like a typo (below).
+            Some(Err(e)) if e.kind() == std::io::ErrorKind::InvalidData => {
+                self.config_mtime = mtime;
+                logfile::ERRORS.line("config.json changed on disk but is not valid: kept current settings");
+                if let Some(p) = config::path() {
+                    config::back_up_bad(&p);
+                }
+                return;
+            }
+            // Unreadable right now (an editor holding it): try again next time.
+            _ => return,
+        };
         self.config_mtime = mtime;
         if self.last_written.as_deref() == Some(text.as_str()) {
             return;
         }
         match Config::parse(&text) {
             Some(loaded) => {
+                config::mark_valid();
                 logfile::ERRORS.line("config.json changed on disk: reloaded");
                 let autostart = platform::autostart_enabled();
                 self.apply_settings(ctx, loaded, autostart, false);
             }
-            // Invalid (mid-save, a typo): keep the current settings; the
-            // next write changes the mtime and is looked at again.
-            None => logfile::ERRORS.line("config.json changed on disk but is not valid: kept current settings"),
+            // Invalid (mid-save, a typo): keep the current settings, and
+            // back the file up so a later save (a drag, Settings) can't
+            // destroy the edit. The next write is looked at again.
+            None => {
+                logfile::ERRORS.line("config.json changed on disk but is not valid: kept current settings");
+                if let Some(p) = config::path() {
+                    config::back_up_bad(&p);
+                }
+            }
         }
     }
 
@@ -364,10 +383,9 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         ui.set_opacity(self.config.opacity.clamp(0.5, 1.0));
         let view_before = self.ui.view;
-        let (size, actions) = {
-            let s = model::lock(&self.state);
-            self.ui.draw(ui, &s, &self.config)
-        };
+        // Draw from a copy: layout must never hold up the workers' writes.
+        let snapshot = model::lock(&self.state).clone();
+        let (size, actions) = self.ui.draw(ui, &snapshot, &self.config);
         for a in actions {
             match a {
                 ui::Action::Hide => self.window.hide(),

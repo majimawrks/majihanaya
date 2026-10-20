@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Which usage window the tray icon's number shows.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,26 +95,64 @@ pub fn publish(config: &Config) {
     *CURRENT.write().unwrap_or_else(|e| e.into_inner()) = Some(config.clone());
 }
 
+/// Largest config.json we read; a real one is about 1 KB.
+pub const MAX_BYTES: u64 = 1024 * 1024;
+
+/// Set while config.json holds text we could not use and could not back up:
+/// saving would destroy the only copy, so saves are refused until a valid
+/// file is read again.
+static SAVE_BLOCKED: AtomicBool = AtomicBool::new(false);
+
+/// config.json is not valid (startup or a live edit): copy it to
+/// `config.json.bad` before any later save (a drag, Settings) replaces it.
+/// If the copy fails, saves are blocked instead.
+pub fn back_up_bad(path: &Path) {
+    let backup = path.with_extension("json.bad");
+    let note = match fs::copy(path, &backup) {
+        Ok(_) => {
+            SAVE_BLOCKED.store(false, Ordering::SeqCst);
+            format!("config.json is not valid: copied to {}", backup.display())
+        }
+        Err(e) => {
+            SAVE_BLOCKED.store(true, Ordering::SeqCst);
+            format!("config.json is not valid and could not be backed up ({e}): settings will not be saved until it is fixed")
+        }
+    };
+    crate::logfile::ERRORS.line(&note);
+}
+
+/// A valid config.json was read: saving over it is safe again.
+pub fn mark_valid() {
+    SAVE_BLOCKED.store(false, Ordering::SeqCst);
+}
+
 pub fn path() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("majihanaya").join("config.json"))
 }
 
 impl Config {
     /// Missing file → defaults (and the file is created). Unreadable or
-    /// invalid file → defaults, and the file is left alone so nothing is lost.
+    /// invalid file → defaults, after copying it to `config.json.bad`: the
+    /// next save (a drag, Settings) overwrites config.json, and the user's
+    /// file must survive that.
     pub fn load() -> Self {
         let Some(path) = path() else {
             return Self::default();
         };
-        match fs::read_to_string(&path) {
-            Ok(text) => serde_json::from_str::<Self>(text.trim_start_matches('\u{feff}')).unwrap_or_default().sanitized(),
+        match crate::proc::read_text_capped(&path, MAX_BYTES) {
+            Ok(text) => Self::parse(&text).unwrap_or_else(|| Self::defaults_after_bad(&path)),
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 let cfg = Self::default();
                 let _ = cfg.save();
                 cfg
             }
-            Err(_) => Self::default(),
+            Err(_) => Self::defaults_after_bad(&path),
         }
+    }
+
+    fn defaults_after_bad(path: &Path) -> Self {
+        back_up_bad(path);
+        Self::default()
     }
 
     /// Clamps values a hand-edited file could make dangerous (zero or huge
@@ -148,6 +187,9 @@ impl Config {
 
     /// `save`, returning the exact text written (to recognise our own write).
     pub fn save_text(&self) -> io::Result<String> {
+        if SAVE_BLOCKED.load(Ordering::SeqCst) {
+            return Err(io::Error::other("config.json is invalid and not backed up"));
+        }
         let path = path().ok_or_else(|| io::Error::other("no config dir"))?;
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir)?;

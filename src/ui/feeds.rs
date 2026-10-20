@@ -314,15 +314,18 @@ pub fn wall(state: &AppState, config: &Config, now: DateTime<Utc>, tz: FixedOffs
     let list = &state.sessions.list;
     let status = config.show_status.then(|| {
         // The worst of the services shown; named when only one is affected.
+        // Unknown above Green: one healthy service must not hide that the
+        // other can't be checked.
         let rank = |l: StatusLevel| match l {
-            StatusLevel::Unknown => 0,
-            StatusLevel::Green => 1,
+            StatusLevel::Green => 0,
+            StatusLevel::Unknown => 1,
             StatusLevel::Yellow => 2,
             StatusLevel::Red => 3,
         };
+        let interval = Duration::from_secs(config.status_interval_seconds);
         let shown: Vec<(&str, StatusLevel)> = [
-            ("CLAUDE", sections.iter().any(|s| s.name == "CLAUDE"), state.claude_status.level),
-            ("CODEX", sections.iter().any(|s| s.name == "CODEX"), state.codex_status.level),
+            ("CLAUDE", sections.iter().any(|s| s.name == "CLAUDE"), state.claude_status.level_at(interval, now)),
+            ("CODEX", sections.iter().any(|s| s.name == "CODEX"), state.codex_status.level_at(interval, now)),
         ]
         .into_iter()
         .filter(|(_, on, _)| *on)

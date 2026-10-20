@@ -112,24 +112,46 @@ fn wait_capture(child: &mut Child, timeout: Duration) -> io::Result<Captured> {
     Ok(Captured { stdout, stderr })
 }
 
-/// Reads a pipe to the end on its own thread; the result arrives on the channel.
+/// Most of a child's output we keep per pipe; `/usage` prints a few KB.
+const MAX_CAPTURE_BYTES: u64 = 1024 * 1024;
+
+/// Reads a pipe to the end on its own thread; the result arrives on the
+/// channel. Keeps the first `MAX_CAPTURE_BYTES` and discards the rest, so a
+/// runaway child can't grow our memory (its timeout still ends it).
 fn drain(mut pipe: impl Read + Send + 'static) -> mpsc::Receiver<Vec<u8>> {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         let mut buf = Vec::new();
-        let _ = pipe.read_to_end(&mut buf);
+        let _ = (&mut pipe).take(MAX_CAPTURE_BYTES).read_to_end(&mut buf);
+        let _ = io::copy(&mut pipe, &mut io::sink());
         let _ = tx.send(buf);
     });
     rx
 }
 
-/// First match for `name` on `PATH`, trying `.exe` then `.cmd` (an exact
-/// filename with an extension is tried as is).
+/// A whole text file, or an error when it is larger than `max` bytes: a huge
+/// or corrupt file must not exhaust memory.
+pub fn read_text_capped(path: &Path, max: u64) -> io::Result<String> {
+    let mut buf = Vec::new();
+    std::fs::File::open(path)?.take(max + 1).read_to_end(&mut buf)?;
+    if buf.len() as u64 > max {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "file too large"));
+    }
+    String::from_utf8(buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
+/// First match for `name` on `PATH`: directories in PATH order, and within
+/// each `.exe` then `.cmd` (an exact filename with an extension is tried as
+/// is). Empty and relative entries are skipped: they resolve against the
+/// current directory, which may be Downloads or wherever we were started.
 pub fn find_on_path(name: &str) -> Option<PathBuf> {
-    let path = env::var_os("PATH")?;
+    find_in(&env::var_os("PATH")?, name)
+}
+
+fn find_in(path: &std::ffi::OsStr, name: &str) -> Option<PathBuf> {
     let exts: &[&str] = if Path::new(name).extension().is_some() { &[""] } else { &[".exe", ".cmd"] };
-    for ext in exts {
-        for dir in env::split_paths(&path) {
+    for dir in env::split_paths(path).filter(|d| d.is_absolute()) {
+        for ext in exts {
             let candidate = dir.join(format!("{name}{ext}"));
             if candidate.is_file() {
                 return Some(candidate);
@@ -152,5 +174,60 @@ pub fn process_start_filetime(pid: u32) -> Option<u64> {
         let ok = GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user).is_ok();
         let _ = CloseHandle(handle);
         ok.then(|| ((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsString;
+    use std::fs;
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let d = env::temp_dir().join(format!("majihanaya-proc-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn joined(dirs: &[&Path]) -> OsString {
+        env::join_paths(dirs).unwrap()
+    }
+
+    #[test]
+    fn path_order_beats_extension_order() {
+        let (first, later) = (temp_dir("first"), temp_dir("later"));
+        fs::write(first.join("tool.cmd"), "").unwrap();
+        fs::write(later.join("tool.exe"), "").unwrap();
+        assert_eq!(find_in(&joined(&[&first, &later]), "tool"), Some(first.join("tool.cmd")));
+        // Within one directory, .exe still wins.
+        fs::write(first.join("tool.exe"), "").unwrap();
+        assert_eq!(find_in(&joined(&[&first, &later]), "tool"), Some(first.join("tool.exe")));
+        let _ = (fs::remove_dir_all(first), fs::remove_dir_all(later));
+    }
+
+    #[test]
+    fn empty_and_relative_entries_are_skipped() {
+        let real = temp_dir("real");
+        fs::write(real.join("tool.cmd"), "").unwrap();
+        // A planted tool.exe in the current directory must not be found
+        // through "", "." or a relative entry.
+        let cwd = env::current_dir().unwrap();
+        let planted = cwd.join("majihanaya-planted.exe");
+        fs::write(&planted, "").unwrap();
+        let path = OsString::from(format!(";.;sub;{}", real.display()));
+        assert_eq!(find_in(&path, "majihanaya-planted"), None);
+        assert_eq!(find_in(&path, "tool"), Some(real.join("tool.cmd")));
+        let _ = (fs::remove_file(planted), fs::remove_dir_all(real));
+    }
+
+    #[test]
+    fn capped_read_rejects_large_files() {
+        let d = temp_dir("cap");
+        let f = d.join("x.json");
+        fs::write(&f, "12345").unwrap();
+        assert_eq!(read_text_capped(&f, 5).unwrap(), "12345");
+        assert_eq!(read_text_capped(&f, 4).unwrap_err().kind(), io::ErrorKind::InvalidData);
+        let _ = fs::remove_dir_all(d);
     }
 }

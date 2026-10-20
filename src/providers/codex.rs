@@ -303,6 +303,23 @@ fn write_windows(state: &Shared, windows: Vec<CodexWindow>) {
     s.codex.error = None;
 }
 
+/// Stores an `account/read` answer. Another identity, or being logged out
+/// at all, drops the windows read so far: one account's quota must never
+/// show under another's name, nor be brought back by the rollout fallback.
+fn apply_account(c: &mut CodexState, account: Option<CodexAccount>, now: DateTime<Utc>) {
+    let identity = |a: &Option<CodexAccount>| a.as_ref().map(|a| (a.kind.clone(), a.email.clone()));
+    let changed = c.account_read && identity(&c.account) != identity(&account);
+    if changed || account.is_none() {
+        c.windows.clear();
+        c.source = CodexSource::None;
+        c.source_time = None;
+        c.last_success = None;
+        c.identity_since = Some(now);
+    }
+    c.account = account;
+    c.account_read = true;
+}
+
 fn write_failure(state: &Shared, msg: &str) {
     let mut s = lock(state);
     s.codex.error = Some(msg.to_owned());
@@ -315,7 +332,10 @@ fn fall_back(state: &Shared, err: &str) {
         write_failure(state, "Codex: not installed");
         return;
     }
-    match rollout_snapshot() {
+    // Rollouts carry no account: one written before the identity changed
+    // may be the previous account's, so it is not used.
+    let since = lock(state).codex.identity_since;
+    match rollout_snapshot().filter(|(time, _)| since.is_none_or(|since| *time >= since)) {
         Some((time, windows)) => {
             let mut s = lock(state);
             s.codex.presence = Presence::Found;
@@ -339,7 +359,11 @@ struct Server {
     /// Dropped after the kill in `Drop`: ends anything the child started.
     _job: Option<proc::JobGuard>,
     stdin: ChildStdin,
-    rx: Receiver<String>,
+    /// Lines from stdout; `None` once it closes. An empty line is a
+    /// "Refresh now" wake-up.
+    rx: Receiver<Option<String>>,
+    /// Keeps the wake-up hook registered only while this server lives.
+    _hook: HookGuard,
     pid: u32,
     state: Shared,
     next_id: u64,
@@ -367,8 +391,10 @@ impl Server {
         // our memory growing.
         let (tx, rx) = mpsc::sync_channel(256);
         // "Refresh now" wakes `idle` with an empty line (ignored as input).
+        // This sender outlives stdout, so the reader reports EOF itself.
         let wake = tx.clone();
-        REFRESH.add_hook(Box::new(move || !matches!(wake.try_send(String::new()), Err(mpsc::TrySendError::Disconnected(_)))));
+        let hook = REFRESH
+            .add_hook(Box::new(move || !matches!(wake.try_send(Some(String::new())), Err(mpsc::TrySendError::Disconnected(_)))));
         thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
             let mut buf = Vec::new();
@@ -378,18 +404,19 @@ impl Server {
                 match (&mut reader).take(MAX_LINE_BYTES).read_until(b'\n', &mut buf) {
                     Ok(0) | Err(_) => break,
                     Ok(_) => {
-                        if tx.send(String::from_utf8_lossy(&buf).into_owned()).is_err() {
-                            break;
+                        if tx.send(Some(String::from_utf8_lossy(&buf).into_owned())).is_err() {
+                            return;
                         }
                     }
                 }
             }
+            let _ = tx.send(None);
         });
         // Drain and discard stderr so the child never blocks on a full pipe.
         thread::spawn(move || {
             let _ = std::io::copy(&mut BufReader::new(stderr), &mut std::io::sink());
         });
-        Ok(Self { child, _job: job, stdin, rx, pid, state: state.clone(), next_id: 2, col: Collected::default() })
+        Ok(Self { child, _job: job, stdin, rx, _hook: hook, pid, state: state.clone(), next_id: 2, col: Collected::default() })
     }
 
     fn send(&mut self, msg: Value) -> Result<(), String> {
@@ -408,9 +435,9 @@ impl Server {
                 return Err("timeout".into());
             }
             match self.rx.recv_timeout(left) {
-                Ok(line) => handle_line(&line, &mut self.col),
+                Ok(Some(line)) => handle_line(&line, &mut self.col),
                 Err(RecvTimeoutError::Timeout) => return Err("timeout".into()),
-                Err(RecvTimeoutError::Disconnected) => return Err("codex exited".into()),
+                Ok(None) | Err(RecvTimeoutError::Disconnected) => return Err("codex exited".into()),
             }
         }
         Ok(())
@@ -447,18 +474,20 @@ impl Server {
         let account_id = if want_account { Some(self.request("account/read", Some(json!({})))?) } else { None };
         let mut ids = vec![limits_id];
         ids.extend(account_id);
-        self.wait_for(&ids)?;
+        let waited = self.wait_for(&ids);
 
-        // The account first, even if the limits failed: a logged-out answer
-        // (`account: null`) must replace the old identity.
+        // The account first, even if the limits failed or timed out: a new
+        // identity or a logged-out answer (`account: null`) must replace the
+        // old one before anything (the rollout fallback) uses it.
         let account = account_id.and_then(|id| self.col.take(id)).and_then(Result::ok).map(|r| parse_account(&r));
         {
             let mut s = lock(&self.state);
             s.codex.server_version = self.col.server_version.clone();
             if let Some(acc) = account {
-                s.codex.account = acc;
+                apply_account(&mut s.codex, acc, Utc::now());
             }
         }
+        waited?;
         let limits = self.col.take(limits_id).unwrap_or_else(|| Err("no reply".into()));
         let windows = match limits {
             Ok(v) => parse_rate_limits(&v).ok_or_else(|| "unexpected response".to_string())?,
@@ -485,7 +514,7 @@ impl Server {
                 return Ok(());
             }
             match self.rx.recv_timeout(left) {
-                Ok(line) => {
+                Ok(Some(line)) => {
                     handle_line(&line, &mut self.col);
                     if let Some(main) = self.col.notified.take() {
                         let current = lock(&self.state).codex.windows.clone();
@@ -494,7 +523,7 @@ impl Server {
                     }
                 }
                 Err(RecvTimeoutError::Timeout) => return Ok(()),
-                Err(RecvTimeoutError::Disconnected) => return Err("codex exited".into()),
+                Ok(None) | Err(RecvTimeoutError::Disconnected) => return Err("codex exited".into()),
             }
         }
     }
@@ -599,6 +628,44 @@ mod tests {
         assert_eq!(acc.kind.as_deref(), Some("chatgpt"));
         assert_eq!(acc.plan_type.as_deref(), Some("plus"));
         assert_eq!(acc.email.as_deref(), Some("user@example.com"));
+    }
+
+    #[test]
+    fn account_switch_drops_old_windows() {
+        let acc = |email: &str| Some(CodexAccount { kind: Some("chatgpt".into()), email: Some(email.into()), plan_type: Some("plus".into()) });
+        let window = CodexWindow { label: "week".into(), bucket: None, window_mins: Some(10080), percent: 40.0, resets_at: None };
+        let t0 = Utc::now();
+        let mut c = CodexState::default();
+        apply_account(&mut c, acc("a@example.com"), t0);
+        assert_eq!(c.identity_since, None, "first read binds nothing");
+        c.windows = vec![window.clone()];
+        c.source = CodexSource::AppServer;
+        c.last_success = Some(t0);
+
+        // Same identity, new plan: windows stay.
+        let mut pro = acc("a@example.com");
+        pro.as_mut().unwrap().plan_type = Some("pro".into());
+        apply_account(&mut c, pro, t0);
+        assert_eq!(c.windows.len(), 1);
+
+        // Another account: A's windows go, and older rollouts are fenced off.
+        let t1 = t0 + chrono::Duration::minutes(1);
+        apply_account(&mut c, acc("b@example.com"), t1);
+        assert!(c.windows.is_empty());
+        assert_eq!((c.source, c.last_success, c.identity_since), (CodexSource::None, None, Some(t1)));
+
+        // Logout counts as a change too.
+        c.windows = vec![window];
+        let t2 = t1 + chrono::Duration::minutes(1);
+        apply_account(&mut c, None, t2);
+        assert!(c.windows.is_empty() && c.account.is_none());
+        assert_eq!(c.identity_since, Some(t2));
+
+        // A first answer of "logged out" drops windows a rollout put there.
+        let mut c = CodexState { windows: vec![CodexWindow { label: "week".into(), bucket: None, window_mins: None, percent: 1.0, resets_at: None }], source: CodexSource::Rollout, ..Default::default() };
+        apply_account(&mut c, None, t2);
+        assert!(c.windows.is_empty());
+        assert_eq!((c.source, c.identity_since), (CodexSource::None, Some(t2)));
     }
 
     #[test]

@@ -33,7 +33,7 @@ pub fn parse_channel(settings_json: &str) -> String {
 fn read_channel() -> String {
     let text = dirs::home_dir()
         .map(|h| h.join(".claude").join("settings.json"))
-        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|p| proc::read_text_capped(&p, 1024 * 1024).ok())
         .unwrap_or_default();
     parse_channel(&text)
 }
@@ -45,12 +45,7 @@ fn local_version(state: &Shared) -> Option<String> {
 }
 
 fn fetch_latest(channel: &str) -> Result<String, String> {
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(10)))
-        .user_agent(concat!("majihanaya/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .into();
-    let mut resp = agent.get(format!("{RELEASES_URL}{channel}")).call().map_err(|e| e.to_string())?;
+    let mut resp = super::status::http_agent().get(format!("{RELEASES_URL}{channel}")).call().map_err(|e| e.to_string())?;
     let body = resp.body_mut().read_to_string().map_err(|e| e.to_string())?;
     let body = body.trim();
     parse_version(body).filter(|v| v == body).ok_or_else(|| "unexpected version response".to_string())

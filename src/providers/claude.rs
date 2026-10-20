@@ -263,7 +263,8 @@ fn probe_auth(state: &Shared, cli: &Path) -> Option<ClaudeAccount> {
 
 fn desktop_sample() -> Option<DesktopSample> {
     let path = dirs::config_dir()?.join("Claude").join("plan-usage-history.json");
-    parse_desktop_history(&std::fs::read_to_string(path).ok()?)
+    // Desktop keeps a bounded history; a bigger file is not one we understand.
+    parse_desktop_history(&proc::read_text_capped(&path, 8 * 1024 * 1024).ok()?)
 }
 
 /// One usage probe + (if due) auth status + fallback logic.
@@ -340,6 +341,11 @@ pub fn refresh(state: &Shared, config: &Config) {
                     c.error = None;
                 }
                 Fallback::OrgMismatch => {
+                    // Which account the retained numbers belong to is now in
+                    // doubt: drop them, so the tray, the monitors, the reset
+                    // clocks and the stats all stop showing them alike.
+                    c.limits = ClaudeLimits::default();
+                    c.source = ClaudeSource::None;
                     c.org_mismatch = true;
                     c.error = Some(err);
                 }

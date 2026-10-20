@@ -96,6 +96,8 @@ fn sort_sessions(list: &mut [Session]) {
     });
 }
 
+const MAX_SESSION_FILES: usize = 512;
+
 fn sessions_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".claude").join("sessions"))
 }
@@ -109,15 +111,19 @@ fn read_all(state: &Shared) -> Option<Vec<Session>> {
         Err(_) => return None,
     };
     let own = lock(state).own_pids.clone();
-    let mut list = Vec::new();
-    for entry in entries.flatten() {
+    let mut list: Vec<Session> = Vec::new();
+    // Far more files than sessions anyone runs: a flooded folder costs a
+    // bounded amount of work and memory.
+    for entry in entries.flatten().take(MAX_SESSION_FILES) {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
-        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        // A session file is a few hundred bytes; skip anything absurd.
+        let Ok(text) = proc::read_text_capped(&path, 64 * 1024) else { continue };
         let Some(raw) = parse_session(&text) else { continue };
-        if own.contains(&raw.pid) {
+        // One row per process: more files naming the same PID add nothing.
+        if own.contains(&raw.pid) || list.iter().any(|s| s.pid == raw.pid) {
             continue;
         }
         if let Some(start) = proc::process_start_filetime(raw.pid) {

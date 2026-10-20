@@ -86,13 +86,20 @@ pub fn parse_summary_for(json: &str, relevant: fn(&str) -> bool) -> Option<(Stat
     Some((level, text))
 }
 
-fn fetch_body(url: &str) -> Result<String, String> {
-    let agent: ureq::Agent = ureq::Agent::config_builder()
+/// The HTTP client for our fixed HTTPS URLs: 10 s timeout, and HTTPS only,
+/// so a redirect can never downgrade a request to plain HTTP.
+pub fn http_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(10)))
         .user_agent(concat!("majihanaya/", env!("CARGO_PKG_VERSION")))
+        .https_only(true)
+        .max_redirects(3)
         .build()
-        .into();
-    let mut resp = agent.get(url).call().map_err(|e| e.to_string())?;
+        .into()
+}
+
+fn fetch_body(url: &str) -> Result<String, String> {
+    let mut resp = http_agent().get(url).call().map_err(|e| e.to_string())?;
     resp.body_mut().read_to_string().map_err(|e| e.to_string())
 }
 

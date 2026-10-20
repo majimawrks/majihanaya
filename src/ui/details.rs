@@ -62,7 +62,7 @@ pub fn draw(
         if config.show_status {
             let h = total - left_used - left_gap - BEZEL;
             monitor::monitor(ui, tex, col_w, h, theme::OK.bg, None, Fx::default(), |p, r| {
-                status_screen(p, r, state, tz);
+                status_screen(p, r, state, config, now, tz);
             });
         }
     });
@@ -119,31 +119,41 @@ fn clock_of(t: Option<DateTime<Utc>>, tz: FixedOffset) -> String {
     t.map_or("--:--:--".into(), |t| t.with_timezone(&tz).format("%H:%M:%S").to_string())
 }
 
+/// More characters than any screen line can show: longer text is cut to
+/// this before measuring, so a huge name costs no more than a long one.
+const FIT_MAX_CHARS: usize = 256;
+
 /// `s` shortened with an ellipsis so it fits `max_w`.
 fn fit(p: &Painter, s: &str, font: &FontId, max_w: f32) -> String {
     let width = |t: &str| p.layout_no_wrap(t.to_string(), font.clone(), Color32::WHITE).size().x;
-    if width(s) <= max_w {
-        return s.to_string();
-    }
-    let chars: Vec<char> = s.chars().collect();
-    for n in (0..chars.len()).rev() {
-        let t = chars[..n].iter().collect::<String>() + "…";
-        if width(&t) <= max_w {
-            return t;
-        }
-    }
-    "…".into()
+    fit_with(s, max_w, width)
 }
 
-fn status_screen(p: &Painter, r: Rect, state: &AppState, tz: FixedOffset) {
+/// `fit` with the measuring done by `width`: a binary search for the
+/// longest prefix that fits with its ellipsis (a few layouts, not one per
+/// character).
+fn fit_with(s: &str, max_w: f32, width: impl Fn(&str) -> f32) -> String {
+    let chars: Vec<char> = s.chars().take(FIT_MAX_CHARS + 1).collect();
+    if chars.len() <= FIT_MAX_CHARS && width(s) <= max_w {
+        return s.to_string();
+    }
+    let cut = |n: usize| chars[..n].iter().collect::<String>() + "…";
+    // The longest prefix that fits is in lo..=hi; "…" alone is the floor.
+    let (mut lo, mut hi) = (0, chars.len().min(FIT_MAX_CHARS));
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if width(&cut(mid)) <= max_w { lo = mid } else { hi = mid - 1 }
+    }
+    cut(lo)
+}
+
+fn status_screen(p: &Painter, r: Rect, state: &AppState, config: &Config, now: DateTime<Utc>, tz: FixedOffset) {
     header(p, r, "CAM 07 · STATUS", &clock_of(state.claude_status.last_success, tz));
-    let rows = [("CLAUDE", Some(&state.claude_status)), ("CODEX", Some(&state.codex_status))];
+    let interval = std::time::Duration::from_secs(config.status_interval_seconds);
+    let rows = [("CLAUDE", &state.claude_status), ("CODEX", &state.codex_status)];
     for (i, (name, status)) in rows.into_iter().enumerate() {
         let y = r.top() + 16.0 + 3.0 + i as f32 * 19.0 + 8.0;
-        let (color, label) = match status {
-            Some(s) => status_look(s),
-            None => (theme::NO_DATA.fg, "--".to_string()),
-        };
+        let (color, label) = status_look(status, status.level_at(interval, now));
         p.circle_filled(pos2(r.left() + 3.5, y), 3.5, color);
         text(p, pos2(r.left() + 15.0, y), Align2::LEFT_CENTER, name, vt(18.0), color, 0.0);
         let x = r.left() + 15.0 + 56.0 + 8.0;
@@ -152,8 +162,11 @@ fn status_screen(p: &Painter, r: Rect, state: &AppState, tz: FixedOffset) {
     }
 }
 
-fn status_look(s: &ServiceStatus) -> (Color32, String) {
-    match s.level {
+/// `level`: the status's level as of now (`Unknown` once stale).
+fn status_look(s: &ServiceStatus, level: StatusLevel) -> (Color32, String) {
+    match level {
+        // Had a good fetch once, but nothing recent: say so rather than "--".
+        StatusLevel::Unknown if s.last_success.is_some() => (theme::NO_DATA.fg, "UNAVAILABLE".into()),
         StatusLevel::Green => (theme::OK.fg, "OPERATIONAL".into()),
         StatusLevel::Yellow => (chrome::AMBER, if s.text.is_empty() { "DEGRADED".into() } else { s.text.to_uppercase() }),
         StatusLevel::Red => (theme::CRIT.fg, if s.text.is_empty() { "OUTAGE".into() } else { s.text.to_uppercase() }),
@@ -373,6 +386,23 @@ mod tests {
         assert_eq!(utc_label(FixedOffset::east_opt(7 * 3600).unwrap()), "UTC+7");
         assert_eq!(utc_label(FixedOffset::east_opt(5 * 3600 + 1800).unwrap()), "UTC+5:30");
         assert_eq!(utc_label(FixedOffset::west_opt(3 * 3600).unwrap()), "UTC-3");
+    }
+
+    #[test]
+    fn fit_cuts_long_text_with_few_measurements() {
+        let calls = std::cell::Cell::new(0);
+        // One unit per character.
+        let width = |t: &str| {
+            calls.set(calls.get() + 1);
+            t.chars().count() as f32
+        };
+        assert_eq!(fit_with("short", 10.0, width), "short");
+        assert_eq!(fit_with("abcdefghijkl", 6.0, width), "abcde…");
+        assert_eq!(fit_with("abc", 0.5, width), "…");
+        calls.set(0);
+        let huge = "x".repeat(1_000_000);
+        assert_eq!(fit_with(&huge, 11.0, width), format!("{}…", "x".repeat(10)));
+        assert!(calls.get() < 20, "{} measurements", calls.get());
     }
 
     #[test]

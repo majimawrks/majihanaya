@@ -23,7 +23,7 @@ pub fn lock(state: &Shared) -> std::sync::MutexGuard<'_, AppState> {
 /// Wakes the UI after a worker changed `AppState`.
 pub type Notify = Arc<dyn Fn() + Send + Sync>;
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppState {
     pub claude: ClaudeState,
@@ -163,6 +163,14 @@ pub struct CodexState {
     pub source_time: Option<DateTime<Utc>>,
     /// Server version from the `initialize` reply's user agent, if parsed.
     pub server_version: Option<String>,
+    /// `account/read` has answered at least once, so `account: None` means
+    /// logged out rather than not asked yet.
+    #[serde(skip)]
+    pub account_read: bool,
+    /// When the signed-in identity last changed (or was found logged out):
+    /// rollout events older than this may be another account's.
+    #[serde(skip)]
+    pub identity_since: Option<DateTime<Utc>>,
     pub last_success: Option<DateTime<Utc>>,
     pub last_attempt: Option<DateTime<Utc>>,
     pub error: Option<String>,
@@ -214,6 +222,14 @@ pub struct ServiceStatus {
     pub error: Option<String>,
 }
 
+impl ServiceStatus {
+    /// The level, or `Unknown` once the last good fetch is stale: while the
+    /// page can't be reached, an old "operational" must not stand.
+    pub fn level_at(&self, interval: Duration, now: DateTime<Utc>) -> StatusLevel {
+        if is_stale(self.last_success, interval, now) { StatusLevel::Unknown } else { self.level }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VersionState {
@@ -229,13 +245,34 @@ pub struct VersionState {
 pub struct Refresh {
     epoch: Mutex<u64>,
     cv: Condvar,
-    hooks: Mutex<Vec<Box<dyn Fn() -> bool + Send>>>,
+    /// (id, hook); ids come from `next_hook`.
+    hooks: Mutex<Vec<(u64, Hook)>>,
+    next_hook: Mutex<u64>,
 }
 
-pub static REFRESH: LazyLock<Refresh> =
-    LazyLock::new(|| Refresh { epoch: Mutex::new(0), cv: Condvar::new(), hooks: Mutex::new(Vec::new()) });
+type Hook = Box<dyn Fn() -> bool + Send>;
+
+/// Unregisters its hook when dropped, so a hook (and whatever it holds)
+/// lives exactly as long as the worker state it wakes.
+#[must_use = "dropping the guard unregisters the hook at once"]
+pub struct HookGuard {
+    owner: &'static Refresh,
+    id: u64,
+}
+
+impl Drop for HookGuard {
+    fn drop(&mut self) {
+        self.owner.hooks.lock().unwrap_or_else(|e| e.into_inner()).retain(|(id, _)| *id != self.id);
+    }
+}
+
+pub static REFRESH: LazyLock<Refresh> = LazyLock::new(Refresh::new);
 
 impl Refresh {
+    fn new() -> Self {
+        Refresh { epoch: Mutex::new(0), cv: Condvar::new(), hooks: Mutex::new(Vec::new()), next_hook: Mutex::new(0) }
+    }
+
     pub fn epoch(&self) -> u64 {
         *self.epoch.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -245,11 +282,23 @@ impl Refresh {
         *self.epoch.lock().unwrap_or_else(|e| e.into_inner()) += 1;
         self.cv.notify_all();
         // A hook returning false is dead (its worker is gone) and is dropped.
-        self.hooks.lock().unwrap_or_else(|e| e.into_inner()).retain(|h| h());
+        self.hooks.lock().unwrap_or_else(|e| e.into_inner()).retain(|(_, h)| h());
     }
 
-    pub fn add_hook(&self, hook: Box<dyn Fn() -> bool + Send>) {
-        self.hooks.lock().unwrap_or_else(|e| e.into_inner()).push(hook);
+    /// Registers `hook` until the returned guard is dropped.
+    pub fn add_hook(&'static self, hook: Hook) -> HookGuard {
+        let id = {
+            let mut n = self.next_hook.lock().unwrap_or_else(|e| e.into_inner());
+            *n += 1;
+            *n
+        };
+        self.hooks.lock().unwrap_or_else(|e| e.into_inner()).push((id, hook));
+        HookGuard { owner: self, id }
+    }
+
+    #[cfg(test)]
+    fn hook_count(&self) -> usize {
+        self.hooks.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     /// Sleeps up to `dur`; returns early when `trigger` is called.
@@ -278,5 +327,34 @@ mod tests {
         assert!(is_stale(None, i, now));
         assert!(!is_stale(Some(now - chrono::Duration::seconds(200)), i, now));
         assert!(is_stale(Some(now - chrono::Duration::seconds(211)), i, now));
+    }
+
+    #[test]
+    fn hook_guard_unregisters() {
+        static R: LazyLock<Refresh> = LazyLock::new(Refresh::new);
+        let fired = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let f = fired.clone();
+        let guard = R.add_hook(Box::new(move || {
+            f.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            true
+        }));
+        R.trigger();
+        assert_eq!((R.hook_count(), fired.load(std::sync::atomic::Ordering::SeqCst)), (1, 1));
+        drop(guard);
+        assert_eq!(R.hook_count(), 0);
+        R.trigger();
+        assert_eq!(fired.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn service_status_goes_unknown_when_stale() {
+        let now = Utc::now();
+        let i = Duration::from_secs(120);
+        let mut s = ServiceStatus { level: StatusLevel::Green, last_success: Some(now), ..Default::default() };
+        assert_eq!(s.level_at(i, now), StatusLevel::Green);
+        // Fetches failing for a while after one good one: no longer "OK".
+        s.last_success = Some(now - chrono::Duration::minutes(10));
+        s.error = Some("offline".into());
+        assert_eq!(s.level_at(i, now), StatusLevel::Unknown);
     }
 }

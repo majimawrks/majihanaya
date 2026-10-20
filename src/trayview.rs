@@ -117,7 +117,10 @@ pub fn view(state: &AppState, config: &Config, now: DateTime<Utc>) -> View {
 
     let x = &state.codex;
     if config.show_codex && x.presence != Presence::Missing {
-        let stale = is_stale(x.last_success, Duration::from_secs(config.codex_interval_seconds), now);
+        // Rollout data is historical and carries no account (it may be a
+        // previous login's): shown as stale, never driving the icon.
+        let stale = x.source == CodexSource::Rollout
+            || is_stale(x.last_success, Duration::from_secs(config.codex_interval_seconds), now);
         let stale_since = x.last_success.filter(|_| stale);
         for w in &x.windows {
             lines.push(Line {
