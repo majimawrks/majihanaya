@@ -174,8 +174,6 @@ fn status_look(s: &ServiceStatus, level: StatusLevel) -> (Color32, String) {
     }
 }
 
-/// Claude Desktop runs all its sessions in one process, so its registry
-/// entry stands for every Desktop session (named after the latest one).
 /// The project a session runs in: the last folder of its working directory,
 /// else its name.
 fn project_of(s: &Session) -> String {
@@ -190,19 +188,30 @@ fn is_desktop(s: &Session) -> bool {
     s.entrypoint.as_deref().is_some_and(|e| e.to_lowercase().contains("desktop"))
 }
 
-/// Right-hand text of a session row: BUSY, what it waits for, IDLE or CLI.
-fn session_meta(s: &Session) -> String {
-    match &s.status {
-        SessionStatus::Working => "BUSY".into(),
-        SessionStatus::Waiting(Some(what)) if !what.is_empty() => what.to_uppercase(),
-        SessionStatus::Waiting(_) => "WAITING".into(),
-        // The Desktop row already says DESKTOP in its name.
-        SessionStatus::Idle => if is_desktop(s) { "DESKTOP" } else { "CLI" }.into(),
+/// Left column of a session row: what the session is doing.
+fn session_tag(s: &Session) -> &'static str {
+    match s.status {
+        SessionStatus::Working => "● BUSY",
+        SessionStatus::Waiting(_) => "◆ WAIT",
+        SessionStatus::Idle => "○ IDLE",
     }
 }
 
-/// Hover text for a Claude Desktop row: why it shows only a project.
-const DESKTOP_NOTE: &str = "Claude Desktop runs all of its Claude Code sessions in one process and writes a single entry for them in ~/.claude/sessions, so this row stands for every Desktop session. It shows the project of the most recent one; the conversation name in that entry is often stale, so it isn't shown. Sessions started from a terminal get one row each.";
+/// Right column: what a waiting session waits for; nothing otherwise.
+fn session_detail(s: &Session) -> Option<String> {
+    match &s.status {
+        SessionStatus::Waiting(Some(what)) if !what.is_empty() => Some(what.to_uppercase()),
+        _ => None,
+    }
+}
+
+/// Hover text for a Claude Desktop row: why its title may be out of date.
+const DESKTOP_NOTE: &str = "Claude Desktop runs all of its Claude Code sessions in one process and writes a single entry for them in ~/.claude/sessions, so this row stands for every Desktop session. The title shown is the one in that entry: Desktop doesn't update it as you switch or rename conversations, so it is often stale. Sessions started from a terminal get one row each, with live titles.";
+
+/// Marquee speed for a hovered, cut-off title, in points per second.
+const MARQUEE_SPEED: f32 = 30.0;
+/// Blank space between the end of a scrolling title and its next pass.
+const MARQUEE_GAP: f32 = 32.0;
 
 /// Draws the rows; returns the rects of Claude Desktop rows (for hover help).
 fn sessions_screen(p: &Painter, r: Rect, state: &AppState, tz: FixedOffset, blink_on: bool) -> Vec<Rect> {
@@ -216,10 +225,11 @@ fn sessions_screen(p: &Painter, r: Rect, state: &AppState, tz: FixedOffset, blin
         max += 1;
     }
     let (shown, more) = if list.len() > max { (max.saturating_sub(1), list.len() - max.saturating_sub(1)) } else { (list.len(), 0) };
+    let hover = p.ctx().pointer_hover_pos();
     let mut desktop = Vec::new();
     for (i, s) in list.iter().take(shown).enumerate() {
         let row = Rect::from_min_size(pos2(r.left() - 4.0, top + i as f32 * 26.0), vec2(r.width() + 8.0, 22.0));
-        session_row(p, row, s, blink_on);
+        session_row(p, row, s, blink_on, hover.is_some_and(|h| row.contains(h)));
         if is_desktop(s) {
             desktop.push(row);
         }
@@ -231,34 +241,81 @@ fn sessions_screen(p: &Painter, r: Rect, state: &AppState, tz: FixedOffset, blin
     desktop
 }
 
-fn session_row(p: &Painter, row: Rect, s: &Session, blink_on: bool) {
+/// A 12×10 glyph for where the session runs: a monitor on a stand for
+/// Claude Desktop, a `>_` prompt for the CLI.
+fn kind_glyph(p: &Painter, left: f32, mid: f32, desktop: bool, color: Color32) {
+    let stroke = egui::Stroke::new(1.2, color);
+    if desktop {
+        p.rect_stroke(Rect::from_min_max(pos2(left, mid - 5.0), pos2(left + 12.0, mid + 2.5)), 1.0, stroke, egui::StrokeKind::Inside);
+        let cx = left + 6.0;
+        p.line_segment([pos2(cx, mid + 2.5), pos2(cx, mid + 4.5)], stroke);
+        p.line_segment([pos2(cx - 3.5, mid + 5.0), pos2(cx + 3.5, mid + 5.0)], stroke);
+    } else {
+        p.line_segment([pos2(left + 0.5, mid - 4.0), pos2(left + 4.5, mid)], stroke);
+        p.line_segment([pos2(left + 4.5, mid), pos2(left + 0.5, mid + 4.0)], stroke);
+        p.line_segment([pos2(left + 6.0, mid + 4.5), pos2(left + 12.0, mid + 4.5)], stroke);
+    }
+}
+
+/// Status | kind glyph · PROJECT · title | waiting reason.
+fn session_row(p: &Painter, row: Rect, s: &Session, blink_on: bool, hovered: bool) {
     let waiting = matches!(s.status, SessionStatus::Waiting(_));
     if waiting && blink_on {
         p.rect_filled(row, 3.0, Color32::from_rgba_unmultiplied(251, 191, 36, 41));
     }
-    let (tag, tag_fg, name_fg, meta_fg) = match &s.status {
-        SessionStatus::Working => ("● REC", if blink_on { chrome::REC_ON } else { chrome::REC_OFF }, chrome::INK, theme::OK.fg),
-        SessionStatus::Waiting(_) => ("◆ WAIT", chrome::AMBER, chrome::AMBER, chrome::AMBER),
-        SessionStatus::Idle => ("○ IDLE", theme::OK.dim, chrome::PLATE_TEXT, theme::OK.dim),
+    let (tag_fg, name_fg, glyph_fg) = match &s.status {
+        SessionStatus::Working => (if blink_on { chrome::REC_ON } else { chrome::REC_OFF }, chrome::INK, theme::OK.fg),
+        SessionStatus::Waiting(_) => (chrome::AMBER, chrome::AMBER, chrome::AMBER),
+        SessionStatus::Idle => (theme::OK.dim, chrome::PLATE_TEXT, theme::OK.dim),
     };
     let mid = row.center().y;
     let (x0, x1) = (row.left() + 4.0, row.right() - 4.0);
-    text(p, pos2(x0, mid), Align2::LEFT_CENTER, tag, vt(17.0), tag_fg, 0.0);
-    let meta = text(p, pos2(x1, mid), Align2::RIGHT_CENTER, &session_meta(s), vt(16.0), meta_fg, 0.0);
-    let name_x = x0 + 50.0 + 8.0;
-    let room = meta.left() - 8.0 - name_x;
+    text(p, pos2(x0, mid), Align2::LEFT_CENTER, session_tag(s), vt(17.0), tag_fg, 0.0);
+    let right = match session_detail(s) {
+        Some(d) => text(p, pos2(x1, mid), Align2::RIGHT_CENTER, &d, vt(16.0), chrome::AMBER, 0.0).left() - 8.0,
+        None => x1,
+    };
+    let glyph_x = x0 + 50.0 + 8.0;
+    kind_glyph(p, glyph_x, mid, is_desktop(s), glyph_fg);
+    let name_x = glyph_x + 12.0 + 6.0;
     // "MAJIHANAYA · Plan review": the project (the session's folder) first,
-    // the conversation name dimmed after it. Claude Desktop rows show the
-    // project only: its single shared entry's name is often stale (see
-    // DESKTOP_NOTE, shown on hover).
+    // the conversation title dimmed after it.
     let project = project_of(s);
-    let lead_text = fit(p, &project.to_uppercase(), &vt(17.0), room);
+    let lead_text = fit(p, &project.to_uppercase(), &vt(17.0), right - name_x);
     let lead = text(p, pos2(name_x, mid), Align2::LEFT_CENTER, &lead_text, vt(17.0), name_fg, 1.0);
-    if !is_desktop(s) && !s.name.eq_ignore_ascii_case(&project) {
-        let x = lead.right() + 6.0;
-        let rest = fit(p, &format!("· {}", s.name), &mono(11.0), meta.left() - 8.0 - x);
-        text(p, pos2(x, mid), Align2::LEFT_CENTER, &rest, mono(11.0), chrome::MUTED, 0.0);
+    if s.name.eq_ignore_ascii_case(&project) {
+        return;
     }
+    let dot = text(p, pos2(lead.right() + 6.0, mid), Align2::LEFT_CENTER, "·", mono(11.0), chrome::MUTED, 0.0);
+    let area = Rect::from_min_max(pos2(dot.right() + 4.0, row.top()), pos2(right, row.bottom()));
+    if area.width() <= 8.0 {
+        return;
+    }
+    title_text(p, area, &s.name, hovered);
+}
+
+/// The dimmed title in `area`: cut with an ellipsis, or, while the row is
+/// hovered and the title doesn't fit, scrolling through it.
+fn title_text(p: &Painter, area: Rect, title: &str, hovered: bool) {
+    let font = mono(11.0);
+    let mid = area.center().y;
+    let title: String = title.chars().take(FIT_MAX_CHARS).collect();
+    let galley = p.layout_no_wrap(title.clone(), font.clone(), chrome::MUTED);
+    let w = galley.size().x;
+    if !hovered || w <= area.width() {
+        let cut = fit(p, &title, &font, area.width());
+        text(p, pos2(area.left(), mid), Align2::LEFT_CENTER, &cut, font, chrome::MUTED, 0.0);
+        return;
+    }
+    let ctx = p.ctx();
+    let period = w + MARQUEE_GAP;
+    let offset = (ctx.input(|i| i.time) as f32 * MARQUEE_SPEED) % period;
+    let clipped = p.with_clip_rect(area.intersect(p.clip_rect()));
+    let y = mid - galley.size().y / 2.0;
+    clipped.galley(pos2(area.left() - offset, y), galley.clone(), chrome::MUTED);
+    clipped.galley(pos2(area.left() - offset + period, y), galley, chrome::MUTED);
+    // Only while the pointer is on this row; leaving it stops the motion.
+    ctx.request_repaint();
 }
 
 struct ClockRow {
@@ -318,7 +375,10 @@ fn clocks_screen(p: &Painter, r: Rect, rows: &[ClockRow], tz: FixedOffset) {
         text(p, pos2(r.right() - 152.0, mid), Align2::LEFT_CENTER, &k.at, vt(18.0), k.ph.fg, 0.0);
         text(p, pos2(r.right(), mid), Align2::RIGHT_CENTER, &k.left, vt(18.0), k.ph.dim, 0.0);
     }
-    text(p, pos2(r.left(), r.bottom()), Align2::LEFT_BOTTOM, "local time", mono(10.0), theme::OK.dim, 0.0);
+    // A fourth row takes the note's place (the header already names the zone).
+    if rows.len() < 4 {
+        text(p, pos2(r.left(), r.bottom()), Align2::LEFT_BOTTOM, "local time", mono(10.0), theme::OK.dim, 0.0);
+    }
 }
 
 /// 1874 -> "1,874".
@@ -406,12 +466,18 @@ mod tests {
     }
 
     #[test]
-    fn session_meta_text() {
+    fn session_columns() {
         let s = |status, entrypoint: Option<&str>| Session { pid: 1, name: "x".into(), status, cwd: None, entrypoint: entrypoint.map(Into::into) };
-        assert_eq!(session_meta(&s(SessionStatus::Working, None)), "BUSY");
-        assert_eq!(session_meta(&s(SessionStatus::Waiting(Some("permission".into())), None)), "PERMISSION");
-        assert_eq!(session_meta(&s(SessionStatus::Idle, Some("claude-desktop"))), "DESKTOP");
-        assert_eq!(session_meta(&s(SessionStatus::Idle, None)), "CLI");
+        // Left: always the status; right: only what a waiting session waits for.
+        assert_eq!(session_tag(&s(SessionStatus::Working, None)), "● BUSY");
+        assert_eq!(session_tag(&s(SessionStatus::Idle, Some("claude-desktop"))), "○ IDLE");
+        assert_eq!(session_tag(&s(SessionStatus::Waiting(None), None)), "◆ WAIT");
+        assert_eq!(session_detail(&s(SessionStatus::Waiting(Some("permission".into())), None)).as_deref(), Some("PERMISSION"));
+        assert_eq!(session_detail(&s(SessionStatus::Waiting(None), None)), None);
+        assert_eq!(session_detail(&s(SessionStatus::Idle, Some("claude-desktop"))), None);
+        assert_eq!(session_detail(&s(SessionStatus::Working, None)), None);
+        assert!(is_desktop(&s(SessionStatus::Idle, Some("claude-desktop"))));
+        assert!(!is_desktop(&s(SessionStatus::Idle, None)));
     }
 
     #[test]

@@ -1,6 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod config;
+#[cfg(debug_assertions)]
+mod demo;
 mod logfile;
 mod model;
 mod platform;
@@ -31,8 +33,16 @@ fn main() -> eframe::Result {
         return Ok(());
     };
 
-    let config = Config::load();
+    #[cfg(debug_assertions)]
+    let demo = demo::enabled();
+    #[cfg(not(debug_assertions))]
+    let demo = false;
+    // The demo never reads or writes the user's config.
+    let config = if demo { Config::default() } else { Config::load() };
     logfile::ERRORS.line(concat!("majihanaya ", env!("CARGO_PKG_VERSION"), " started"));
+    #[cfg(debug_assertions)]
+    let state: model::Shared = if demo { std::sync::Arc::new(std::sync::Mutex::new(demo::state())) } else { Default::default() };
+    #[cfg(not(debug_assertions))]
     let state: model::Shared = Default::default();
     // The design's compact window; resized to its content after the first frame.
     let size = [ui::COMPACT_W, 440.0];
@@ -64,7 +74,11 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| {
             let ctx = cc.egui_ctx.clone();
-            spawn_workers(&state, &config, Arc::new(move || ctx.request_repaint()));
+            if demo {
+                config::publish(&config);
+            } else {
+                spawn_workers(&state, &config, Arc::new(move || ctx.request_repaint()));
+            }
             Ok(Box::new(App::new(cc, config, state)?))
         }),
     )
@@ -119,6 +133,9 @@ struct App {
     pos: Option<egui::Pos2>,
     /// Set when the user starts a title-bar drag; cleared once it is saved.
     dragging: Option<std::time::Instant>,
+    /// Debug builds: when to take the `MAJIHANAYA_SHOT` frame.
+    #[cfg(debug_assertions)]
+    shot_at: Option<std::time::Instant>,
 }
 
 impl App {
@@ -184,6 +201,8 @@ impl App {
             size: egui::vec2(ui::COMPACT_W, 440.0),
             pos: None,
             dragging: None,
+            #[cfg(debug_assertions)]
+            shot_at: demo::shot_path().map(|_| std::time::Instant::now() + std::time::Duration::from_secs(2)),
         })
     }
 
@@ -234,6 +253,11 @@ impl App {
     /// so our own write is never mistaken for an outside edit (and an outside
     /// edit landing right after ours is never mistaken for ours).
     fn save_config(&mut self) {
+        #[cfg(debug_assertions)]
+        if demo::enabled() {
+            config::publish(&self.config);
+            return;
+        }
         if let Ok(text) = self.config.save_text() {
             self.last_written = Some(text);
         }
@@ -405,8 +429,30 @@ impl eframe::App for App {
             self.fit(&ctx, size.ceil());
         }
         self.track_position(&ctx);
+        #[cfg(debug_assertions)]
+        self.take_shot(&ctx);
     }
 
+}
+
+#[cfg(debug_assertions)]
+impl App {
+    /// `MAJIHANAYA_SHOT`: once the window has settled, save a frame and exit.
+    fn take_shot(&mut self, ctx: &egui::Context) {
+        let Some(at) = self.shot_at else { return };
+        if std::time::Instant::now() < at {
+            ctx.request_repaint_after(at - std::time::Instant::now());
+            return;
+        }
+        self.shot_at = None;
+        let (Some(path), window, quit) = (demo::shot_path(), self.window, self.quitting.clone()) else { return };
+        ctx.request_screenshot(move |image| {
+            demo::save(&path, &image);
+            quit.store(true, Ordering::SeqCst);
+            window.post_close();
+        });
+        ctx.request_repaint();
+    }
 }
 
 fn config_mtime() -> Option<std::time::SystemTime> {

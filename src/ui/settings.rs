@@ -439,6 +439,16 @@ pub fn draw(ui: &mut Ui, draft: &mut Draft) -> Option<Outcome> {
     };
     text(ui.painter(), pos2(foot.center().x, y + 14.0), Align2::CENTER_CENTER, &msg, vt(17.0), col, 1.0);
 
+    let (legal, _) = ui.allocate_exact_size(vec2(ui.available_width(), 14.0), Sense::hover());
+    label(
+        ui.painter(),
+        legal.center(),
+        Align2::CENTER_CENTER,
+        "majihanaya - made by majima with AI assistance - \u{00A9} majimawrks 2026",
+        10.0,
+        chrome::MUTED,
+    );
+
     if reset.clicked() {
         draft.reset_defaults();
     }
