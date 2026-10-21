@@ -149,8 +149,75 @@ impl Window {
         }
     }
 
+    /// Tray click: hides the window when it is in plain view, otherwise
+    /// (hidden, or covered by another window) brings it to the front.
+    /// Whether it is the active window can't decide this: clicking the tray
+    /// icon makes the taskbar active first.
     pub fn toggle(self) {
-        if self.is_visible() { self.hide() } else { self.show() }
+        if self.is_visible() && !self.is_covered() { self.hide() } else { self.show() }
+    }
+
+    /// Whether another app's window above ours in the z-order overlaps it.
+    fn is_covered(self) -> bool {
+        use windows::Win32::Foundation::RECT;
+        use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GW_HWNDPREV, GetClassNameW, GetWindow, GetWindowRect, GetWindowThreadProcessId, IsIconic,
+        };
+        /// Shell windows that sit above everything but never hide the app:
+        /// the taskbars, the tray overflow and tooltips (the tray icon's own).
+        const SHELL: [&str; 5] =
+            ["Shell_TrayWnd", "Shell_SecondaryTrayWnd", "NotifyIconOverflowWindow", "TopLevelWindowForOverflowXamlIsland", "tooltips_class32"];
+        // The visible frame: without the invisible resize borders, which
+        // would make a window merely next to ours count as overlapping.
+        let frame = |hwnd: HWND| -> Option<RECT> {
+            let mut r = RECT::default();
+            // SAFETY: read-only queries into a RECT we own.
+            unsafe {
+                if DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, (&mut r as *mut RECT).cast(), size_of::<RECT>() as u32)
+                    .is_err()
+                {
+                    GetWindowRect(hwnd, &mut r).ok()?;
+                }
+            }
+            Some(r)
+        };
+        let Some(ours) = frame(self.hwnd()) else { return false };
+        let own_pid = std::process::id();
+        // SAFETY: walks the z-order with read-only queries; handles of other
+        // windows are only passed back to the system, never dereferenced.
+        unsafe {
+            let mut next = GetWindow(self.hwnd(), GW_HWNDPREV);
+            while let Ok(w) = next {
+                next = GetWindow(w, GW_HWNDPREV);
+                if !IsWindowVisible(w).as_bool() || IsIconic(w).as_bool() {
+                    continue;
+                }
+                // Visible but not shown: UWP apps parked in the background,
+                // windows on other virtual desktops.
+                let mut cloaked = 0u32;
+                let _ = DwmGetWindowAttribute(w, DWMWA_CLOAKED, (&mut cloaked as *mut u32).cast(), 4);
+                if cloaked != 0 {
+                    continue;
+                }
+                let mut pid = 0u32;
+                GetWindowThreadProcessId(w, Some(&mut pid));
+                if pid == own_pid {
+                    continue;
+                }
+                let mut class = [0u16; 64];
+                let n = GetClassNameW(w, &mut class) as usize;
+                if SHELL.contains(&String::from_utf16_lossy(&class[..n]).as_str()) {
+                    continue;
+                }
+                if let Some(r) = frame(w) {
+                    if r.left < ours.right && r.right > ours.left && r.top < ours.bottom && r.bottom > ours.top {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
 
     /// Moves the window so its *visible* frame (title bar included, invisible

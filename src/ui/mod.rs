@@ -24,6 +24,8 @@ use std::time::{Duration, Instant};
 use theme::{chrome, vt};
 
 pub const COMPACT_W: f32 = 320.0;
+/// Shown after the name in the title bar.
+const VERSION_LABEL: &str = concat!("v", env!("CARGO_PKG_VERSION"));
 /// What "100%" (`scale = 1.0`) really draws at. The layout is designed in
 /// the units above; this shrinks the whole app so the wide views are 615 px
 /// at 100% Windows scaling: 45% of a 1366-wide laptop screen.
@@ -236,7 +238,9 @@ impl WindowUi {
             p.circle_filled(c, 5.0, led.gamma_multiply(0.25));
         }
         p.circle_filled(c, 3.5, led);
-        let tr = text(p, pos2(bar.left() + 16.0, bar.center().y), Align2::LEFT_CENTER, "MAJIHANAYA", vt(19.0), chrome::PLATE_TEXT, 3.0);
+        let name = text(p, pos2(bar.left() + 16.0, bar.center().y), Align2::LEFT_CENTER, "MAJIHANAYA", vt(19.0), chrome::PLATE_TEXT, 3.0);
+        // The running build, dimmed, in every view.
+        let tr = text(p, pos2(name.right() + 6.0, bar.center().y), Align2::LEFT_CENTER, VERSION_LABEL, vt(15.0), chrome::MUTED, 1.0);
         let sub = match self.view {
             View::Compact => None,
             View::Details => Some("· MONITOR WALL"),

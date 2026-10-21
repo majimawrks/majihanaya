@@ -30,10 +30,14 @@ fn main() -> eframe::Result {
     logfile::install_panic_hook();
     // Started by Restart: let the old instance finish exiting first.
     platform::wait_for_predecessor();
-    let Some(_instance) = platform::single_instance() else {
+    // Debug screenshot runs (one frame, then exit) may run beside the
+    // user's own copy.
+    let shot = cfg!(debug_assertions) && std::env::var_os("MAJIHANAYA_SHOT").is_some();
+    let _instance = platform::single_instance();
+    if _instance.is_none() && !shot {
         platform::activate_existing();
         return Ok(());
-    };
+    }
 
     #[cfg(debug_assertions)]
     let demo = demo::enabled();
